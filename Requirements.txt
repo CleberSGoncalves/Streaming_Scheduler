@@ -1,0 +1,15 @@
+amazoncaptcha
+beautifulsoup4
+cryptography
+google-api-python-client
+pandas
+paramiko
+psutil
+pygetwindow
+requests
+requests-ntlm
+schedule
+selenium
+SharePlum
+webdriver-manager
+yt-dlp

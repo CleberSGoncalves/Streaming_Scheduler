@@ -1,0 +1,75 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.spec
+.venv/
+venv/
+.env
+.env.*
+*.env.enc
+*.envrc
+
+# --- Configuração / Credenciais ---
+*.key
+*.enc
+*.pem
+*.crt
+*.csr
+auth.xml
+auth.xml.*
+config.xml
+config.xml.*
+secret.key
+*.log
+*.csv
+*.db
+*.sqlite
+
+# --- Logs ---
+*.log
+*.error.log
+log.txt
+app.log
+update.log
+update_error.log
+
+# --- Build / Distribuição ---
+build/
+dist/
+*.exe
+*.msi
+*.zip
+*.tar
+*.gz
+*.bat
+*.cmd
+
+# --- Perfis temporários ---
+TempProfile/
+TempProfile2/
+chromeDriver.exe
+chromedriver.exe
+Chrome1.bat
+Chrome2.bat
+Gerador profile*.bat
+Instalador*.bat
+Inicializar_Streaming_Scheduler.bat
+
+# --- Ferramentas auxiliares ---
+unzip.exe
+update.bat
+update.zip
+update*.bat
+
+# --- IDEs / Workspaces ---
+.vscode/
+.idea/
+*.code-workspace
+
+# --- Outros ---
+*.bak
+*.tmp
+*.old
+*.swp
