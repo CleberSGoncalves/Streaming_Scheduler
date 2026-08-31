@@ -1,3 +1,361 @@
+# === ChatGPT injected prelude (non-intrusive) ===
+# Generated: 2025-09-24T16:41:23.015658
+# Features:
+# - Rotating logs
+# - Thread-safe Tkinter calls from worker threads
+# - Auto FAQ tab
+# - Robust date parsing & Treeview date normalization (fix '2026' issue)
+# - Global excepthook to log uncaught exceptions
+# - TimePopup safe patch to allow any minute (e.g., 12:13) and avoid m_scale error
+
+import sys, threading, logging, re, os, time, requests, subprocess, shutil, csv, psutil, json
+import pypdfium2 as pdfium
+from datetime import datetime, timedelta
+from logging.handlers import RotatingFileHandler
+
+threadingTimer = None
+
+global monitoramento_ativo
+
+
+last_daily_run = None
+monitoramento_ativo = False
+
+
+# ---- Rotating logs ----
+if not logging.getLogger().handlers:
+    _fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(filename)s %(lineno)d - %(message)s",
+                             datefmt="%Y-%m-%d %H:%M:%S")
+    _rot = RotatingFileHandler("log.txt", maxBytes=5_000_000, backupCount=7, encoding="utf-8")
+    _rot.setFormatter(_fmt)
+    logging.getLogger().setLevel(logging.INFO)
+    logging.getLogger().addHandler(_rot)
+
+# ---- Thread-safe Tk wrappers ----
+_TS_ROOT = None
+import queue
+_ui_queue = queue.Queue()
+
+def _process_ui_queue():
+    while True:
+        try:
+            task = _ui_queue.get_nowait()
+            task()
+        except queue.Empty:
+            break
+    if _TS_ROOT:
+        _TS_ROOT.after(100, _process_ui_queue)
+
+def _wrap_ui_func(func):
+    def _inner(*args, **kwargs):
+        if threading.current_thread() is threading.main_thread():
+            return func(*args, **kwargs)
+        
+        # worker thread: use queue
+        holder = {'val': None, 'exc': None}
+        ev = threading.Event()
+        
+        def _task():
+            try:
+                holder['val'] = func(*args, **kwargs)
+            except Exception as e:
+                holder['exc'] = e
+            finally:
+                ev.set()
+        
+        _ui_queue.put(_task)
+        # We still wait because many calls (like get) expect a return value
+        if not ev.wait(timeout=5.0):
+            logging.warning("UI task %s timed out", getattr(func, "__name__", str(func)))
+            return None
+        if holder['exc']:
+            raise holder['exc']
+        return holder['val']
+    return _inner
+
+def install_threadsafe_ui(root):
+    global _TS_ROOT
+    _TS_ROOT = root
+    _process_ui_queue()
+    try:
+        import tkinter as tk
+        import tkinter.ttk as ttk
+        import tkinter.messagebox as mb
+        # Wrap BaseWidget.configure
+        try:
+            tk.BaseWidget.configure = _wrap_ui_func(tk.BaseWidget.configure)
+            tk.BaseWidget.config = tk.BaseWidget.configure
+        except Exception as e:
+            logging.debug("wrap BaseWidget.configure failed: %s", e)
+        # Wrap common ttk.Treeview ops
+        try:
+            ttk.Treeview.insert = _wrap_ui_func(ttk.Treeview.insert)
+            ttk.Treeview.delete = _wrap_ui_func(ttk.Treeview.delete)
+            ttk.Treeview.item   = _wrap_ui_func(ttk.Treeview.item)
+        except Exception as e:
+            logging.debug("wrap Treeview ops failed: %s", e)
+        # Wrap Text insert/delete
+        try:
+            tk.Text.insert = _wrap_ui_func(tk.Text.insert)
+            tk.Text.delete = _wrap_ui_func(tk.Text.delete)
+        except Exception as e:
+            logging.debug("wrap Text failed: %s", e)
+        # Wrap IntVar/StringVar etc.
+        try:
+            tk.Variable.set = _wrap_ui_func(tk.Variable.set)
+            tk.Variable.get = _wrap_ui_func(tk.Variable.get)
+        except Exception as e:
+            logging.debug("wrap Variable failed: %s", e)
+        # Wrap messageboxes
+        for name in ('showinfo','showwarning','showerror','askyesno','askokcancel','askquestion','askretrycancel','askyesnocancel'):
+            if hasattr(mb, name):
+                setattr(mb, name, _wrap_ui_func(getattr(mb, name)))
+    except Exception as e:
+        logging.exception("install_threadsafe_ui failed: %s", e)
+
+# Auto-install on Tk()
+try:
+    import tkinter as _tk_auto
+    _orig_Tk_init = _tk_auto.Tk.__init__
+    def _patched_Tk_init(self, *a, **kw):
+        _orig_Tk_init(self, *a, **kw)
+        try:
+            install_threadsafe_ui(self)
+        except Exception as e:
+            logging.debug("auto-install thread-safe ui failed: %s", e)
+    _tk_auto.Tk.__init__ = _patched_Tk_init
+except Exception as e:
+    logging.debug("Tk not available during import: %s", e)
+
+# ---- FAQ tab injection ----
+_FAQ_ATTEMPTS = 0
+def _add_faq_tab_if_possible(root):
+    global _FAQ_ATTEMPTS
+    try:
+        import tkinter as tk
+        import tkinter.ttk as ttk
+        def _find_notebook(w):
+            try:
+                for ch in w.winfo_children():
+                    try:
+                        if isinstance(ch, ttk.Notebook):
+                            return ch
+                    except Exception:
+                        pass
+                    nb = _find_notebook(ch); 
+                    if nb: return nb
+            except Exception: pass
+            return None
+        nb = _find_notebook(root)
+        if nb is None:
+            _FAQ_ATTEMPTS += 1
+            if _FAQ_ATTEMPTS < 50:
+                root.after(300, lambda: _add_faq_tab_if_possible(root))
+            else:
+                logging.info("FAQ: Notebook não encontrado; ignorado.")
+            return
+        faq = ttk.Frame(nb)
+        text = tk.Text(faq, wrap="word", height=30, width=120)
+        scroll = ttk.Scrollbar(faq, orient="vertical", command=text.yview)
+        text.configure(yscrollcommand=scroll.set)
+        text.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+        faq.rowconfigure(0, weight=1); faq.columnconfigure(0, weight=1)
+        _FAQ_TEXT = """📌 **FAQ — Streaming Scheduler / Monitor de Qualidade (Completo)**
+
+**Streaming (aba principal)**
+- Busca eventos nas plataformas selecionadas (Prime etc.), preenche a grade, exporta/atualiza e pode enviar por e‑mail.
+- Botões **Esquerdo/Direito** alternam o navegador a usar.
+- *Auto Email as* agenda o horário diário de envio. *Auto Busca* agenda coleta automática.
+- *Somente relatório*: executa a coleta/geração sem abrir navegadores extras.
+
+**Acessos**
+- Configura credenciais e parâmetros (SMTP, diretórios, números de arquivos a varrer, etc.).
+- Arquivos sensíveis (.env, config.xml, auth.xml) não são versionados por segurança.
+
+**Logs**
+- Mostra erros/avisos. Este build usa **logs rotativos** (`log.txt` ~5 MB, 7 backups). Exceções não capturadas também caem aqui.
+
+**FAQ**
+- Esta aba.
+
+**Proteções deste build**
+- **UI thread-safe**: qualquer chamada de threads para widgets é redirecionada à thread principal do Tk.
+- **Normalização de datas**: ao inserir linhas na grade, a coluna *Data* é analisada e **corrigida** (evita pular para 2026 quando o cartão é ambíguo).
+- **Editor de Horário**: permite minutos livres (ex.: 12:13) e evita o erro de `m_scale` inexistente.
+
+**Dicas**
+- Marque *Wake the computer* no Agendador do Windows para executar enquanto o PC está ocioso.
+- Use `.venv` e `requirements.txt`.
+- Verifique o `log.txt` ao investigar qualquer comportamento estranho.
+"""
+        try:
+            text.insert("1.0", _FAQ_TEXT)
+            text.configure(state="disabled")
+        except Exception as e:
+            logging.debug("FAQ text insert failed: %s", e)
+        try:
+            nb.add(faq, text="FAQ")
+        except Exception as e:
+            logging.debug("FAQ tab add failed: %s", e)
+        logging.info("FAQ: aba adicionada.")
+    except Exception as e:
+        logging.exception("FAQ: erro ao montar aba: %s", e)
+
+try:
+    import tkinter as _tk_faq
+    _orig_Tk_init_faq = _tk_faq.Tk.__init__
+    def _patched_Tk_init_faq(self, *a, **kw):
+        _orig_Tk_init_faq(self, *a, **kw)
+        try:
+            self.after(350, lambda: _add_faq_tab_if_possible(self))
+        except Exception as e:
+            logging.debug("FAQ schedule failed: %s", e)
+    _tk_faq.Tk.__init__ = _patched_Tk_init_faq
+except Exception as e:
+    logging.debug("FAQ Tk patch failed: %s", e)
+
+# ---- Date parsing + normalization for Treeview.insert ----
+from datetime import datetime, timedelta
+_MONTHS = {"jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
+           "jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12}
+
+def _try_int(x):
+    try: return int(x)
+    except: return None
+
+def parse_event_date(texto_data: str, *, referencia: datetime|None=None, ended: bool=False) -> datetime:
+    ref = referencia or datetime.now()
+    t = (texto_data or "").strip()
+
+    m = re.search(r"[A-Za-z]{3},?\s+([A-Za-z]{3})\s+(\d{1,2})(?:\s+(\d{4}))?", t)
+    if m:
+        mon = _MONTHS.get(m.group(1).lower())
+        day = _try_int(m.group(2))
+        year = _try_int(m.group(3)) or ref.year
+        try:
+            dt = datetime(year, mon, day)
+            if not ended and (ref - dt).days > 60:
+                dt = datetime(year+1, mon, day)
+            return dt
+        except Exception:
+            pass
+
+    m = re.search(r"(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?", t)
+    if m:
+        a, b, y = m.group(1), m.group(2), m.group(3)
+        year = _try_int(y)
+        year = (2000+year) if (year is not None and year < 100) else (year or ref.year)
+        d1, m1 = _try_int(a), _try_int(b)
+        try:
+            dt = datetime(year, m1, d1)    # DD/MM
+        except ValueError:
+            dt = datetime(year, d1, m1)    # MM/DD
+        if not ended and (ref - dt).days > 60:
+            dt = datetime(dt.year+1, dt.month, dt.day)
+        return dt
+
+    # 🇧🇷 Prioridade para Hoje/Amanhã se não houver data numérica completa
+    low = t.lower()
+    if "amanh" in low:
+        return ref + timedelta(days=1)
+    if "hoje" in low:
+        return ref
+
+    return ref
+
+def clamp_far_future(dt: datetime, max_days=365) -> datetime:
+    ref = datetime.now()
+    try:
+        if (dt - ref).days > max_days:
+            return datetime(ref.year, dt.month, dt.day)
+        return dt
+    except Exception:
+        return ref
+
+try:
+    import tkinter.ttk as _ttk_norm
+    _orig_tv_insert = _ttk_norm.Treeview.insert
+    def _tv_insert_norm(self, parent, index, iid=None, **kw):
+        vals = kw.get('values')
+        if isinstance(vals, (list, tuple)) and len(vals) >= 3:
+            try:
+                lst = list(vals)
+                lst[2] = clamp_far_future(parse_event_date(str(lst[2]))).strftime("%d/%m/%Y")
+                kw['values'] = tuple(lst)
+            except Exception as e:
+                logging.debug("normalize date failed: %s", e)
+        return _orig_tv_insert(self, parent, index, iid=iid, **kw)
+    _ttk_norm.Treeview.insert = _tv_insert_norm
+    logging.info("Normalization active: Treeview.insert (date idx=2).")
+except Exception as e:
+    logging.debug("Could not install Treeview normalization: %s", e)
+
+# ---- Global excepthook ----
+def _global_ex_hook(exc_type, exc, tb):
+    logging.exception("UNCAUGHT: %s", exc, exc_info=(exc_type, exc, tb))
+sys.excepthook = _global_ex_hook
+
+# ---- TimePopup compatibility patch (minutes free + no m_scale required) ----
+def _patch_timepopup_later(root):
+    try:
+        g = globals()
+        TimePopup = g.get("TimePopup")
+        if TimePopup is None:
+            root.after(500, lambda: _patch_timepopup_later(root))
+            return
+        def _safe_current_hhmm(self):
+            h = None; m = None
+            if hasattr(self, "h_scale"):
+                try: h = int(float(self.h_scale.get()))
+                except Exception: pass
+            if hasattr(self, "m_scale"):
+                try: m = int(float(self.m_scale.get()))
+                except Exception: pass
+            if (m is None) and hasattr(self, "m_entry"):
+                try: m = int(str(self.m_entry.get()).strip() or "0")
+                except Exception: m = 0
+            if (h is None) and hasattr(self, "h_entry"):
+                try: h = int(str(self.h_entry.get()).strip() or "0")
+                except Exception: h = 0
+            if (m is None) and hasattr(self, "minute_var"):
+                try: m = int(self.minute_var.get())
+                except Exception: m = 0
+            if (h is None) and hasattr(self, "hour_var"):
+                try: h = int(self.hour_var.get())
+                except Exception: h = 0
+            h = max(0, min(23, 0 if h is None else h))
+            m = max(0, min(59, 0 if m is None else m))
+            return f"{h:02d}:{m:02d}"
+        def _safe_snap_minute(self, value):
+            try: v = int(round(float(value)))
+            except Exception: v = 0
+            return max(0, min(59, v))  # 1 em 1 minuto
+        try: setattr(TimePopup, "_current_hhmm_from_scales", _safe_current_hhmm)
+        except Exception: pass
+        try: setattr(TimePopup, "_snap_minute", _safe_snap_minute)
+        except Exception: pass
+        logging.info("TimePopup patch aplicado (minutos livres; sem m_scale obrigatório).")
+    except Exception as e:
+        logging.exception("TimePopup patch error: %s", e)
+
+try:
+    import tkinter as _tk_tp
+    _orig_Tk_init_tp = _tk_tp.Tk.__init__
+    def _patched_Tk_init_tp(self, *a, **kw):
+        _orig_Tk_init_tp(self, *a, **kw)
+        try:
+            self.after(400, lambda: _patch_timepopup_later(self))
+        except Exception as e:
+            logging.debug("TimePopup schedule failed: %s", e)
+    _tk_tp.Tk.__init__ = _patched_Tk_init_tp
+except Exception as e:
+    logging.debug("Tk not available for TimePopup patch: %s", e)
+
+# === end prelude ===
+
+
+
 from tkinter import *
 from tkinter import ttk
 import requests
@@ -31,6 +389,8 @@ from shareplum import Site
 from requests_ntlm import HttpNtlmAuth
 import csv, sys
 import pandas as pd
+from tkcalendar import DateEntry
+from datetime import datetime
 import subprocess
 from tkinter import messagebox
 import signal
@@ -47,7 +407,7 @@ import xml.etree.ElementTree as ET
 from update import  Update
 import yt_dlp
 from googleapiclient.discovery import build
-from crypto_utils import criptografar,carregar_env_criptografado,descriptografar,get_config_value
+from crypto_utils import criptografar,carregar_env_criptografado,descriptografar,get_config_value,get_auth_value
 import hashlib
 
 thread_em_execucao = False
@@ -55,12 +415,56 @@ _lock_envio_email = threading.Lock()
 _ultimo_hash_enviado = None
 _ultima_janela_envio = datetime.min
 _COOLDOWN_MIN = 5  # minutos
+_eventos_iniciados = set()
+
+# Globais de UI (Combobox)
+options_plat = []
+checkbox_states_plat = {}
+combo_plat = None
+menu_plat = None
+checkbox_vars_plat = {}
+
+options_camp = []
+checkbox_states_camp = {}
+combo_camp = None
+menu_camp = None
+checkbox_vars_camp = {}
+
+def update_combobox_text_plat():
+    global options_plat, checkbox_states_plat, combo_plat
+    if 'options_plat' not in globals() or 'combo_plat' not in globals(): return
+    selected_options = [opt for opt in options_plat if checkbox_states_plat.get(opt)]
+    combo_plat.set(", ".join(selected_options) if selected_options else "Selecione...")
+
+def toggle_checkbox_plat(option, var):
+    global checkbox_states_plat
+    checkbox_states_plat[option] = var.get()
+    update_combobox_text_plat()
+
+def show_checkbox_menu_plat():
+    global menu_plat, combo_plat
+    menu_plat.tk_popup(combo_plat.winfo_rootx(), combo_plat.winfo_rooty() + combo_plat.winfo_height())
+
+def update_combobox_text_camp():
+    global options_camp, checkbox_states_camp, combo_camp
+    if 'options_camp' not in globals() or 'combo_camp' not in globals(): return
+    selected_options = [opt for opt in options_camp if checkbox_states_camp.get(opt)]
+    combo_camp.set(", ".join(selected_options) if selected_options else "Selecione...")
+
+def toggle_checkbox_camp(option, var):
+    global checkbox_states_camp
+    checkbox_states_camp[option] = var.get()
+    update_combobox_text_camp()
+
+def show_checkbox_menu_camp():
+    global menu_camp, combo_camp
+    menu_camp.tk_popup(combo_camp.winfo_rootx(), combo_camp.winfo_rooty() + combo_camp.winfo_height())
 
 class App:
 
     logging.basicConfig(
     filename="log.txt",
-    level=logging.ERROR,
+    level=logging.DEBUG,
     format="%(asctime)s - %(levelname)s - %(filename)s %(lineno)d - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
     
@@ -118,6 +522,7 @@ class App:
         global checkbox_vars_camp
         global driverchrome1
         global driverchrome2
+        global combo_plat
         driverchrome1 = None
         driverchrome2 = None
 
@@ -147,7 +552,6 @@ class App:
 
         tb1 = Frame(nb)
         nb.add(tb1,text="Streaming")
-        criar_aba_acessos(nb)
         criar_aba_erros(nb)
         refresh_label=Label(tb1)
         ft = tkFont.Font(family='Times',size=10)
@@ -238,21 +642,12 @@ class App:
 
         
         
-        def toggle_checkbox_plat(option, var):
-            checkbox_states_plat[option] = var.get()
-            update_combobox_text_plat()
-
-        def update_combobox_text_plat():
-    # Atualiza o texto do Combobox com as opções selecionadas
-            selected_options = [opt for opt in options_plat if checkbox_states_plat[opt]]
-            combo_plat.set(", ".join(selected_options) if selected_options else "Selecione...")
-
-        def show_checkbox_menu_plat():
-    # Mostra o menu de checkboxes abaixo do Combobox
-            menu_plat.tk_popup(combo_plat.winfo_rootx(), combo_plat.winfo_rooty() + combo_plat.winfo_height())
-        # Opções do Combobox
-        options_plat = ["Amazon Prime", "Disney", "Caze", "Dazn"]
-        checkbox_states_plat = {opt: True for opt in options_plat}  # Rastreia o estado dos checkboxes
+        # Opções do Combobox (Plataformas)
+        global options_plat, checkbox_states_plat, combo_plat, menu_plat, checkbox_vars_plat
+        options_plat = ["Amazon Prime", "Disney", "Cazé TV", "Dazn", "Max", "CBF"]
+        # checkbox_states_plat deve persistir se carregado do XML, senão inicializa True
+        if 'checkbox_states_plat' not in globals() or not checkbox_states_plat:
+            checkbox_states_plat = {opt: True for opt in options_plat}
 
         # Estilo personalizado para os checkboxes (com ícone ✓)
         style = ttk.Style()
@@ -361,6 +756,9 @@ class App:
         # Validação em tempo real
         entry_var_email.trace_add("write", lambda *args: validar_hora_minuto(entry_var_email.get()))
         entry_email2.place(x=765,y=80,width=50,height=20)
+        entry_email2.bind("<KeyRelease>", on_horario_email_alterado)
+
+       
 
                        
         button_update=Button(tb1)
@@ -381,7 +779,7 @@ class App:
         botao_abrir["justify"] = "center"
         botao_abrir.place(x=135,y=80,width=50,height=30)
 
-        botao_salvar = Button(tb1, text="Salvar", comman= salvar)
+        botao_salvar = Button(tb1, text="Salvar", command= salvar)
         botao_salvar["bg"] = "#f0f0f0"
         ft = tkFont.Font(family='Times',size=5)
         botao_salvar["font"] = 'Helvetica 8 bold'
@@ -390,22 +788,11 @@ class App:
         botao_salvar.place(x=187,y=80,width=50,height=30)
 
 
-        def toggle_checkbox_camp(option, var):
-            checkbox_states_camp[option] = var.get()
-            update_combobox_text_camp()
-
-        def update_combobox_text_camp():
-    # Atualiza o texto do Combobox com as opções selecionadas
-            selected_options = [opt for opt in options_camp if checkbox_states_camp[opt]]
-            combo_camp.set(", ".join(selected_options) if selected_options else "Selecione...")
-
-        def show_checkbox_menu_camp():
-    # Mostra o menu de checkboxes abaixo do Combobox
-            menu_camp.tk_popup(combo_camp.winfo_rootx(), combo_camp.winfo_rooty() + combo_camp.winfo_height())
-
-        # Opções do Combobox
-        options_camp = ["Brasileirão serie A", "Brasileirão serie B", "Copa do Brasil","Mundial de Clubes FIFA"]
-        checkbox_states_camp = {opt: True for opt in options_camp}  # Rastreia o estado dos checkboxes
+        # Opções do Combobox (Campeonatos)
+        global options_camp, checkbox_states_camp, combo_camp, menu_camp, checkbox_vars_camp
+        options_camp = ["Brasileirão serie A", "Brasileirão serie B", "Copa do Brasil", "Copa do Mundo", "Mundial de Clubes FIFA", "Campeonato Paulista", "CONMEBOL Libertadores", "CONMEBOL Sudamericana"]
+        if 'checkbox_states_camp' not in globals() or not checkbox_states_camp:
+            checkbox_states_camp = {opt: True for opt in options_camp}
 
         # Cria o Combobox (apenas como gatilho para o menu)
         combo_camp = ttk.Combobox(tb1, state="readonly")
@@ -416,19 +803,15 @@ class App:
         menu_camp = Menu(tb1, tearoff=0)
         checkbox_vars_camp = {}
 
-        def toggle_checkbox_camp():
-            for opt, var in checkbox_vars_camp.items():
-               logging.info(f"{opt} => {var.get()}")
-
         for option in options_camp:
-            var = BooleanVar(value=False)  # ou True se quiser iniciar marcado
+            var = BooleanVar(value=True)  # Inicia marcado por padrão
             checkbox_vars_camp[option] = var
             menu_camp.add_checkbutton(
                 label=option,
                 variable=var,
                 onvalue=True,
                 offvalue=False,
-                command=toggle_checkbox_camp,
+                command=lambda opt=option, v=var: toggle_checkbox_camp(opt, v),
                 indicatoron=True,
                 selectcolor='green'
             )
@@ -439,7 +822,7 @@ class App:
         
 
          # Add a Treeview widget
-        tree = ttk.Treeview(tb1, column=("Campeonato", "Partida", "Data", "Horário","Navegador","Min antes para ação","Canal de Transmissão","Url"), show='headings', height=13)
+        tree = ttk.Treeview(tb1, columns=("Campeonato", "Partida", "Data", "Horário","Navegador","Min antes para ação","Canal de Transmissão","Url"), show='headings', height=13)
         scrollbarV = Scrollbar(root, orient="vertical", command=tree.yview)
         scrollbarV.pack(side="right", fill="y")
         tree.bind("<Double-1>", lambda event: onDoubleClick(tree,event))
@@ -454,22 +837,22 @@ class App:
 
         
     
-        tree.column("# 1", anchor=CENTER,width=minwidth)
-        tree.heading("# 1", text="Campeonato")       
-        tree.column("# 2", anchor=CENTER,width=minwidth)
-        tree.heading("# 2", text="Evento")
-        tree.column("# 3", anchor=CENTER,width=minwidth)
+        tree.column("#1", anchor=CENTER,width=minwidth)
+        tree.heading("#1", text="Campeonato")       
+        tree.column("#2", anchor=CENTER,width=minwidth)
+        tree.heading("#2", text="Evento")
+        tree.column("#3", anchor=CENTER,width=minwidth)
         tree.heading("#3", text="Data", command=lambda: sort_by_date(tree, "#3"))
-        tree.column("# 4", anchor=CENTER,width=minwidth)
-        tree.heading("# 4", text="Horario")
-        tree.column("# 5", anchor=CENTER,width=minwidth)
-        tree.heading("# 5", text="Navegador")
-        tree.column("# 6", anchor=CENTER,width=minwidth)
-        tree.heading("# 6", text="Min antes para ação")
-        tree.column("# 7", anchor=CENTER,width=minwidth)
-        tree.heading("# 7", text="Plataforma")
-        tree.column("# 8", anchor=CENTER,width=minwidth)
-        tree.heading("# 8", text="Url")      
+        tree.column("#4", anchor=CENTER,width=minwidth)
+        tree.heading("#4", text="Horario")
+        tree.column("#5", anchor=CENTER,width=minwidth)
+        tree.heading("#5", text="Navegador")
+        tree.column("#6", anchor=CENTER,width=minwidth)
+        tree.heading("#6", text="Min antes para ação")
+        tree.column("#7", anchor=CENTER,width=minwidth)
+        tree.heading("#7", text="Plataforma")
+        tree.column("#8", anchor=CENTER,width=minwidth)
+        tree.heading("#8", text="Url")      
         tree.place(x=960,y=90,width=250,height=20)
         # tree.bind('<ButtonRelease-1>', selectItem)
         
@@ -480,7 +863,8 @@ class App:
         button_delete["fg"] = "blue"
         button_delete["justify"] = "center"
         button_delete["text"] = "+"
-        button_delete.place(x=5,y=120,width=30,height=20)
+        button_delete.place(x=62, y=345, width=45, height=25)
+
         button_delete["command"] = add
 
         button_add=Button(tb1)
@@ -533,6 +917,9 @@ class App:
       
         toolbar.pack(side=BOTTOM, fill=X)
         
+        criar_aba_acessos(nb)
+        criar_aba_campeonatos(nb)
+        
         def onDoubleClick(tree, event):
             # Fecha popup anterior (se houver)
             try:
@@ -567,11 +954,12 @@ class App:
                             min_value=0, max_value=120, step=1)  # ajuste o range se quiser
             elif col_index == 6:
                 OptionPopup(tree, rowid, col_index, atual, abs_x, abs_y,
-                            options=("Amazon Prime", "Disney", "Caze", "Dazn", "Paramount"))
+                            options=("Amazon Prime", "Disney", "Cazé TV", "Dazn", "Paramount","Max"))
             else:
                 entryPopup = EntryPopup(tree, rowid, col_index, atual)
                 entryPopup.place(x=x, y=y + height // 2, width=width, height=height, anchor='w')
 
+        
 class EntryPopup(ttk.Entry):
     def __init__(self, parent, iid, column, text, **kw):
         ttk.Style().configure('pad.TEntry', padding='1 1 1 1')
@@ -609,6 +997,13 @@ class EntryPopup(ttk.Entry):
         # returns 'break' to interrupt default key-bindings
         return 'break'
 
+def on_horario_email_alterado(event=None):
+    global monitoramento_ativo
+    monitoramento_ativo = False
+    logging.info("Horário alterado — reagendando automaticamente")
+    update_command()  # recria o schedule
+
+
 def _set_cell_value(tv, rowid, col_index, value):
     vals = list(tv.item(rowid, 'values'))
     vals[col_index] = value
@@ -624,9 +1019,7 @@ class DatePopup(Toplevel):
         self.focus_force()
         self.tv, self.rowid, self.column = tv, rowid, column
 
-        # Import local para não impactar outros pontos que já usam DateEntry
-        from tkcalendar import DateEntry
-        from datetime import datetime
+
 
         self.cal = DateEntry(self, date_pattern="dd/MM/yyyy", locale="pt_BR", width=12)
         # Tenta posicionar a data inicial
@@ -982,7 +1375,7 @@ def criar_aba_erros(notebook):
     import re
     from datetime import datetime
     from tkinter import messagebox
-    from tkcalendar import DateEntry
+
 
     aba_erros = Frame(notebook)
     notebook.add(aba_erros, text='Logs')
@@ -1163,35 +1556,46 @@ def criar_aba_acessos(notebook):
     lf = ttk.LabelFrame(frame, text="Cadastrar/Atualizar Credenciais", padding=(20, 15))
     lf.pack(fill="both", expand=True)
 
-    # Campos em pares: (usuário, senha)
+    # Campos em pares: (label, tag_xml, arquivo_fonte)
     pares = [
-        (("Usuário Prime", "usuario_prime"), ("Senha Prime", "senha_prime")),
-        (("Usuário Disney", "usuario_disney"), ("Senha Disney", "senha_disney")),
-        (("Usuário DAZN", "usuario_dazn"), ("Senha DAZN", "senha_dazn")),
-        (("Usuário Paramount", "usuario_paramount"), ("Senha Paramount", "senha_paramount")),
-        (("Usuário Max", "usuario_max"), ("Senha Max", "senha_max")),
+        (("Usuário Prime", "usuario_prime", "config.xml"), ("Senha Prime", "senha_prime", "config.xml")),
+        (("Usuário Disney", "usuario_disney", "config.xml"), ("Senha Disney", "senha_disney", "config.xml")),
+        (("Usuário DAZN", "usuario_dazn", "config.xml"), ("Senha DAZN", "senha_dazn", "config.xml")),
+        (("Usuário Paramount", "usuario_paramount", "config.xml"), ("Senha Paramount", "senha_paramount", "config.xml")),
+        (("Usuário Max", "usuario_max", "config.xml"), ("Senha Max", "senha_max", "config.xml")),
+        (("E-mail SMTP (Gmail)", "email", "auth.xml"), ("Senha SMTP (App Password)", "senha", "auth.xml")),
     ]
 
     entrys = []
-    campos_xml = []
+    campos_info = [] # List of (tag, file)
 
-    for i, ((label_user, campo_user), (label_senha, campo_senha)) in enumerate(pares):
-        # Coluna 0: Usuário
-        ttk.Label(lf, text=label_user + ":").grid(row=i, column=0, sticky="e", padx=8, pady=6)
-        e_user = ttk.Entry(lf, width=25)
-        e_user.grid(row=i, column=1, sticky="w", padx=8, pady=6)
-        entrys.append(e_user)
-        campos_xml.append(campo_user)
+    for i, ((l1, c1, f1), (l2, c2, f2)) in enumerate(pares):
+        # Coluna 0: Primeiro campo do par
+        ttk.Label(lf, text=l1 + ":").grid(row=i, column=0, sticky="e", padx=8, pady=6)
+        e1 = ttk.Entry(lf, width=30)
+        e1.grid(row=i, column=1, sticky="w", padx=8, pady=6)
+        
+        # Pre-fill
+        val1 = get_config_value(c1, f1) if f1 == "config.xml" else get_auth_value(c1, f1)
+        if val1: e1.insert(0, val1)
+        
+        entrys.append(e1)
+        campos_info.append((c1, f1))
 
-        # Coluna 2: Senha
-        ttk.Label(lf, text=label_senha + ":").grid(row=i, column=2, sticky="e", padx=8, pady=6)
-        e_senha = ttk.Entry(lf, width=25, show="*")
-        e_senha.grid(row=i, column=3, sticky="w", padx=8, pady=6)
-        entrys.append(e_senha)
-        campos_xml.append(campo_senha)
+        # Coluna 2: Segundo campo do par (geralmente senha)
+        ttk.Label(lf, text=l2 + ":").grid(row=i, column=2, sticky="e", padx=8, pady=6)
+        e2 = ttk.Entry(lf, width=30, show="*" if "Senha" in l2 else "")
+        e2.grid(row=i, column=3, sticky="w", padx=8, pady=6)
+        
+        # Pre-fill
+        val2 = get_config_value(c2, f2) if f2 == "config.xml" else get_auth_value(c2, f2)
+        if val2: e2.insert(0, val2)
+        
+        entrys.append(e2)
+        campos_info.append((c2, f2))
 
     # Botão de salvar centralizado
-    btn_salvar = ttk.Button(lf, text="💾 Salvar Dados", command=lambda: salvar_novos_acessos(entrys, campos_xml))
+    btn_salvar = ttk.Button(lf, text="💾 Salvar Dados", command=lambda: salvar_novos_acessos(entrys, campos_info))
     btn_salvar.grid(row=len(pares), column=0, columnspan=4, pady=25)
 
     # Ativar tema moderno
@@ -1199,27 +1603,304 @@ def criar_aba_acessos(notebook):
     style.theme_use("clam")
     
         
-def salvar_novos_acessos(entrys, campos):
-            try:
-                tree = ET.parse("config.xml")
-                root = tree.getroot()
+def salvar_novos_acessos(entrys, campos_info):
+    """
+    Salva os dados nos respectivos arquivos (config.xml ou auth.xml)
+    campos_info: lista de (tag, filename)
+    """
+    files_to_save = set(f for _, f in campos_info)
+    
+    try:
+        # Dicionário para gerenciar os Trees dos arquivos
+        trees = {}
+        for fname in files_to_save:
+            if os.path.exists(fname):
+                trees[fname] = ET.parse(fname)
+            else:
+                # Cria arquivo novo se não existir
+                root_tag = 'auth' if fname == 'auth.xml' else 'config'
+                root = ET.Element(root_tag)
+                trees[fname] = ET.ElementTree(root)
 
-                for i, campo in enumerate(campos):
-                    novo_valor = entrys[i].get().strip()
-                    if novo_valor:
-                        # Cria a tag se não existir ainda
-                        if root.find(campo) is None:
-                            ET.SubElement(root, campo)
-                        root.find(campo).text = criptografar(novo_valor)
+        # Atualiza valores
+        for i, (campo, fname) in enumerate(campos_info):
+            novo_valor = entrys[i].get().strip()
+            if novo_valor:
+                root = trees[fname].getroot()
+                elem = root.find(campo)
+                if elem is None:
+                    elem = ET.SubElement(root, campo)
+                elem.text = criptografar(novo_valor)
 
-                tree.write("config.xml", encoding="utf-8", xml_declaration=True)
-                messagebox.showinfo("Sucesso", "Dados atualizados com sucesso.")
+        # Grava os arquivos
+        for fname, tree in trees.items():
+            tree.write(fname, encoding="utf-8", xml_declaration=True)
 
-                for e in entrys:
-                    e.delete(0, tkinter.END)
+        messagebox.showinfo("Sucesso", "Credenciais atualizadas com sucesso.")
 
-            except Exception as e:
-                messagebox.showerror("Erro", f"Falha ao atualizar os dados: {e}")
+    except Exception as e:
+        logging.error(f"Falha ao atualizar credenciais: {e}")
+        messagebox.showerror("Erro", f"Falha ao atualizar os dados: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ABA DE CAMPEONATOS DINÂMICOS
+# ─────────────────────────────────────────────────────────────────────────────
+
+CAMPEONATOS_CONFIG_FILE = "campeonatos_config.json"
+
+PLATAFORMAS_DISPONIVEIS = [
+    "Amazon Prime",
+    "Disney",
+    "Max",
+    "Dazn",
+    "Cazé TV",
+]
+
+def _camp_config_path():
+    """Retorna o caminho do arquivo de configuração de campeonatos."""
+    return os.path.join(os.getcwd(), CAMPEONATOS_CONFIG_FILE)
+
+
+def carregar_campeonatos_config():
+    """Lê campeonatos_config.json e retorna lista de dicts."""
+    path = _camp_config_path()
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        logging.error(f"[CampConfig] Erro ao carregar config: {e}")
+        return []
+
+
+def salvar_campeonatos_config(lista):
+    """Salva lista de campeonatos em campeonatos_config.json."""
+    path = _camp_config_path()
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(lista, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.error(f"[CampConfig] Erro ao salvar config: {e}")
+        raise
+
+
+def criar_aba_campeonatos(notebook):
+    """Cria a aba 'Campeonatos' no notebook para cadastro dinâmico."""
+    import tkinter.font as tkFont
+    from tkinter import messagebox, ttk
+
+    frame = ttk.Frame(notebook, padding=10)
+    notebook.add(frame, text="⚽ Campeonatos")
+
+    # ── Título ────────────────────────────────────────────────────────────────
+    ttk.Label(
+        frame,
+        text="Campeonatos Extras",
+        font=("Helvetica", 11, "bold"),
+    ).pack(anchor="w", pady=(0, 2))
+
+    ttk.Label(
+        frame,
+        text=(
+            "Cadastre aqui campeonatos adicionais para as plataformas suportadas. "
+            "Eles serão buscados automaticamente junto com os demais ao clicar em 'Buscar Eventos'."
+        ),
+        wraplength=1100,
+        foreground="#555",
+    ).pack(anchor="w", pady=(0, 8))
+
+    # ── Grid (Treeview) ───────────────────────────────────────────────────────
+    cols = ("campeonato", "plataforma", "url", "ativo")
+    col_headers = ("Campeonato", "Plataforma", "URL", "Ativo")
+    col_widths   = (220, 130, 580, 60)
+
+    tv_frame = ttk.Frame(frame)
+    tv_frame.pack(fill="both", expand=True)
+
+    tv = ttk.Treeview(tv_frame, columns=cols, show="headings", height=10)
+    for col, hdr, w in zip(cols, col_headers, col_widths):
+        tv.heading(col, text=hdr)
+        tv.column(col, width=w, anchor="w" if col != "ativo" else "center")
+
+    vsb = ttk.Scrollbar(tv_frame, orient="vertical", command=tv.yview)
+    tv.configure(yscrollcommand=vsb.set)
+    tv.pack(side="left", fill="both", expand=True)
+    vsb.pack(side="right", fill="y")
+
+    # ── Funções internas ──────────────────────────────────────────────────────
+
+    def _reload_tv():
+        """Recarrega o treeview a partir do JSON."""
+        for item in tv.get_children():
+            tv.delete(item)
+        for camp in carregar_campeonatos_config():
+            ativo_str = "✅" if camp.get("ativo", True) else "❌"
+            tv.insert(
+                "",
+                "end",
+                values=(
+                    camp.get("campeonato", ""),
+                    camp.get("plataforma", ""),
+                    camp.get("url", ""),
+                    ativo_str,
+                ),
+            )
+
+    def _abrir_formulario(titulo, valores_iniciais=None):
+        """
+        Abre janela de formulário para adicionar/editar.
+        Retorna dict com dados ou None se o usuário cancelou.
+        """
+        result = {}
+        win = Toplevel(notebook)
+        win.title(titulo)
+        win.resizable(False, False)
+        win.grab_set()
+
+        # Calcula posição central
+        win.update_idletasks()
+        pw = notebook.winfo_toplevel()
+        x = pw.winfo_x() + pw.winfo_width()  // 2 - 300
+        y = pw.winfo_y() + pw.winfo_height() // 2 - 140
+        win.geometry(f"600x280+{x}+{y}")
+
+        padx_lbl = 10
+        pady_row = 8
+
+        # Campeonato
+        ttk.Label(win, text="Campeonato:").grid(row=0, column=0, sticky="e", padx=padx_lbl, pady=pady_row)
+        e_camp = ttk.Entry(win, width=45)
+        e_camp.grid(row=0, column=1, columnspan=2, sticky="w", padx=padx_lbl, pady=pady_row)
+
+        # Plataforma
+        ttk.Label(win, text="Plataforma:").grid(row=1, column=0, sticky="e", padx=padx_lbl, pady=pady_row)
+        plat_var = StringVar(value=PLATAFORMAS_DISPONIVEIS[0])
+        cb_plat = ttk.Combobox(win, textvariable=plat_var, values=PLATAFORMAS_DISPONIVEIS, state="readonly", width=25)
+        cb_plat.grid(row=1, column=1, sticky="w", padx=padx_lbl, pady=pady_row)
+
+        # URL
+        ttk.Label(win, text="URL:").grid(row=2, column=0, sticky="e", padx=padx_lbl, pady=pady_row)
+        e_url = ttk.Entry(win, width=60)
+        e_url.grid(row=2, column=1, columnspan=2, sticky="w", padx=padx_lbl, pady=pady_row)
+
+        # Ativo
+        ativo_var = BooleanVar(value=True)
+        ttk.Checkbutton(win, text="Ativo (buscar eventos)", variable=ativo_var).grid(
+            row=3, column=1, sticky="w", padx=padx_lbl, pady=pady_row
+        )
+
+        # Preenche valores iniciais (modo edição)
+        if valores_iniciais:
+            e_camp.insert(0, valores_iniciais.get("campeonato", ""))
+            plat_var.set(valores_iniciais.get("plataforma", PLATAFORMAS_DISPONIVEIS[0]))
+            e_url.insert(0, valores_iniciais.get("url", ""))
+            ativo_var.set(valores_iniciais.get("ativo", True))
+
+        def _confirmar():
+            nome = e_camp.get().strip()
+            url  = e_url.get().strip()
+            if not nome:
+                messagebox.showwarning("Atenção", "Informe o nome do campeonato.", parent=win)
+                return
+            if not url:
+                messagebox.showwarning("Atenção", "Informe a URL do campeonato.", parent=win)
+                return
+            result["campeonato"] = nome
+            result["plataforma"] = plat_var.get()
+            result["url"]        = url
+            result["ativo"]      = ativo_var.get()
+            win.destroy()
+
+        def _cancelar():
+            win.destroy()
+
+        btn_frame = ttk.Frame(win)
+        btn_frame.grid(row=4, column=0, columnspan=3, pady=15)
+        ttk.Button(btn_frame, text="✅ Confirmar", command=_confirmar).pack(side="left", padx=10)
+        ttk.Button(btn_frame, text="❌ Cancelar",  command=_cancelar).pack(side="left", padx=10)
+
+        win.wait_window()
+        return result if result else None
+
+    def _adicionar():
+        dados = _abrir_formulario("Adicionar Campeonato")
+        if not dados:
+            return
+        lista = carregar_campeonatos_config()
+        lista.append(dados)
+        salvar_campeonatos_config(lista)
+        _reload_tv()
+        messagebox.showinfo("Sucesso", f"Campeonato '{dados['campeonato']}' adicionado!")
+
+    def _editar():
+        sel = tv.selection()
+        if not sel:
+            messagebox.showinfo("Atenção", "Selecione um campeonato para editar.")
+            return
+        idx = tv.index(sel[0])
+        lista = carregar_campeonatos_config()
+        if idx >= len(lista):
+            return
+        dados = _abrir_formulario("Editar Campeonato", valores_iniciais=lista[idx])
+        if not dados:
+            return
+        lista[idx] = dados
+        salvar_campeonatos_config(lista)
+        _reload_tv()
+        messagebox.showinfo("Sucesso", f"Campeonato '{dados['campeonato']}' atualizado!")
+
+    def _remover():
+        sel = tv.selection()
+        if not sel:
+            messagebox.showinfo("Atenção", "Selecione um campeonato para remover.")
+            return
+        idx = tv.index(sel[0])
+        lista = carregar_campeonatos_config()
+        if idx >= len(lista):
+            return
+        nome = lista[idx].get("campeonato", "?")
+        if not messagebox.askyesno("Confirmar", f"Remover '{nome}'?"):
+            return
+        lista.pop(idx)
+        salvar_campeonatos_config(lista)
+        _reload_tv()
+
+    def _toggle_ativo():
+        sel = tv.selection()
+        if not sel:
+            messagebox.showinfo("Atenção", "Selecione um campeonato.")
+            return
+        idx = tv.index(sel[0])
+        lista = carregar_campeonatos_config()
+        if idx >= len(lista):
+            return
+        lista[idx]["ativo"] = not lista[idx].get("ativo", True)
+        salvar_campeonatos_config(lista)
+        _reload_tv()
+
+    # ── Barra de botões ───────────────────────────────────────────────────────
+    btn_bar = ttk.Frame(frame)
+    btn_bar.pack(fill="x", pady=(8, 0))
+
+    ttk.Button(btn_bar, text="➕ Adicionar",    command=_adicionar).pack(side="left", padx=4)
+    ttk.Button(btn_bar, text="✏️ Editar",       command=_editar).pack(side="left",   padx=4)
+    ttk.Button(btn_bar, text="🗑️ Remover",      command=_remover).pack(side="left",  padx=4)
+    ttk.Button(btn_bar, text="🔄 Ativar/Pausar", command=_toggle_ativo).pack(side="left", padx=4)
+
+    ttk.Label(
+        btn_bar,
+        text="💡 Dica: Adicione a URL exata da página de eventos do campeonato na plataforma.",
+        foreground="#777",
+        font=("Helvetica", 8),
+    ).pack(side="right", padx=8)
+
+    # Carga inicial
+    _reload_tv()
+
+
 
 class _QuietLogger:
     def debug(self, msg): pass
@@ -1227,161 +1908,357 @@ class _QuietLogger:
     def warning(self, msg): pass
     def error(self, msg): pass
 
+import re
+import unicodedata
+
+SEP_RE = re.compile(r"\s*(?:\||-|–|—|·|•|/|\[|\]|\(|\))\s*")
+BRASILEIRAO_RE = re.compile(r"brasileir[aã]o\s*(\d{4})", re.I)
+COPA_MUNDO_RE = re.compile(r"copa do mundo\s*(fifa)?\s*(\d{4})", re.I)
+RODADA_RE = re.compile(r"(\d{1,2})\s*(?:ª|a)?\s*rodad[ao]\b", re.I)
+PAULISTA_RE = re.compile(r"(campeonato\s+paulista|paulist[aã]o)\s*(\d{4})?", re.I)
+
+def norm(txt: str) -> str:
+    if not txt:
+        return ""
+    t = unicodedata.normalize("NFKD", txt)
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    t = t.lower().strip()
+    t = re.sub(r"^\s*ao vivo[:\- ]*\s*", "", t)
+    t = re.sub(r"\s+", " ", t)
+    return t
+
+def parse_youtube_title(raw_title: str, raw_desc: str = ""):
+    """
+    Analisa título/descrição do YouTube e identifica:
+    - Brasileirão
+    - Copa do Mundo FIFA
+    - Campeonato Paulista
+    - Ano
+    - Rodada (SEPARADA, não entra no nome do campeonato)
+    """
+
+    t = norm(raw_title)
+    d = norm(raw_desc)
+    tokens = SEP_RE.split(t) + [t]
+
+    year = None
+    rodada = None
+
+    is_brasileirao = False
+    is_copa_mundo = False
+    is_paulista = False
+
+    # =========================
+    # BRASILEIRÃO
+    # =========================
+    for tok in tokens:
+        m = BRASILEIRAO_RE.search(tok)
+        if m:
+            is_brasileirao = True
+            year = m.group(1)
+            break
+
+    # =========================
+    # COPA DO MUNDO FIFA
+    # =========================
+    if not is_brasileirao:
+        for tok in tokens:
+            m = COPA_MUNDO_RE.search(tok)
+            if m:
+                is_copa_mundo = True
+                year = m.group(2)
+                break
+
+    # =========================
+    # PAULISTÃO
+    # =========================
+    for tok in tokens:
+        m = PAULISTA_RE.search(tok)
+        if m:
+            is_paulista = True
+            if m.lastindex and m.group(2):
+                year = m.group(2)
+            break
+
+    # =========================
+    # RODADA
+    # =========================
+    for tok in tokens:
+        r = RODADA_RE.search(tok)
+        if r:
+            rodada = int(r.group(1))
+            break
+
+    if rodada is None:
+        r = RODADA_RE.search(t)
+        if r:
+            rodada = int(r.group(1))
+
+    # =========================
+    # FALLBACK NA DESCRIÇÃO
+    # =========================
+    if d:
+        if not is_brasileirao:
+            m = BRASILEIRAO_RE.search(d)
+            if m:
+                is_brasileirao = True
+                year = m.group(1)
+
+        if not is_copa_mundo:
+            m = COPA_MUNDO_RE.search(d)
+            if m:
+                is_copa_mundo = True
+                year = m.group(2)
+
+        if not is_paulista:
+            m = PAULISTA_RE.search(d)
+            if m:
+                is_paulista = True
+                if m.lastindex and m.group(2):
+                    year = m.group(2)
+
+        if rodada is None:
+            r = RODADA_RE.search(d)
+            if r:
+                rodada = int(r.group(1))
+
+    return {
+        "is_brasileirao": is_brasileirao,
+        "is_copa_mundo": is_copa_mundo,
+        "is_paulista": is_paulista,
+        "year": year,
+        "rodada": rodada
+    }
+
+def normalizar_titulo_evento(txt: str) -> str:
+    if not txt:
+        return ""
+    txt = txt.strip().lower()
+    # capitaliza cada palavra
+    return " ".join(p.capitalize() for p in txt.split())
+
 def obter_eventos_futuros(canal_url):
     """
-    Retorna [(champ, titulo, url, dd/mm/YYYY, HH:MM)] para eventos futuros do canal.
-    Não baixa vídeo. Silencia warnings/erros de formatos/lives futuras.
+    Retorna lista de tuplas: [(champ, titulo, url, dd/mm/YYYY, HH:MM)]
+    Só considera lives/vídeos futuros do Brasileirão 2025.
     """
-    from datetime import datetime
-    import yt_dlp
-    import logging
+    from datetime import datetime, timezone
+    import yt_dlp, logging
 
     eventos_futuros = []
+    seen = set()
+
+    # Obtendo data inicial da UI para filtro
+    try:
+        data_inicio_str = entry_data.get()
+        data_inicio_obj = datetime.strptime(data_inicio_str, "%d/%m/%Y")
+    except:
+        data_inicio_obj = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
     try:
-        # 1) Lista rápida do canal (flat) – só IDs e títulos
+        # 1) Listagem rápida do canal
         ydl_opts_list = {
-            'quiet': True,
-            'no_warnings': True,
-            'skip_download': True,
-            'extract_flat': True,
-            'playlistend': 40,
-            'ignoreerrors': True,
+            'quiet': True, 'no_warnings': True, 'skip_download': True,
+            'extract_flat': True, 'playlistend': 40, 'ignoreerrors': True,
             'logger': _QuietLogger(),
         }
         with yt_dlp.YoutubeDL(ydl_opts_list) as ydll:
-            info = ydll.extract_info(canal_url, download=False)
+            info = ydll.extract_info(canal_url, download=False) or {}
 
         for entry in (info.get('entries') or []):
-            titulo_raw = (entry.get('title') or '').strip()
-            titulo = titulo_raw.replace("AO VIVO: ", "").split("|")[0].strip()
-
-            # Sua lógica de campeonato
-            if "BRASILEIRÃO 2025" in titulo_raw.upper():
-                champ = titulo_raw.split("|")[2].strip() if "|" in titulo_raw else ""
-            else:
-                champ = ""
-
-            # Monta URL do vídeo
             vid_url = (
                 entry.get('url')
                 or entry.get('webpage_url')
                 or (f"https://www.youtube.com/watch?v={entry.get('id')}" if entry.get('id') else None)
             )
-            if not vid_url:
+            if not vid_url or vid_url in seen:
                 continue
+            seen.add(vid_url)
 
-            # 2) Re-extrai metadados do VÍDEO (sem download)
+            # 2) Metadados completos do vídeo (sem download)
             ydl_opts_video = {
-                'quiet': True,
-                'no_warnings': True,
-                'skip_download': True,
-                'ignore_no_formats_error': True,   # não reclamar de lives futuras/sem formatos
-                'extractor_retries': 2,
+                'quiet': True, 'no_warnings': True, 'skip_download': True,
+                'ignore_no_formats_error': True, 'extractor_retries': 2,
                 'logger': _QuietLogger(),
             }
             try:
                 with yt_dlp.YoutubeDL(ydl_opts_video) as ydv:
-                    vinfo = ydv.extract_info(vid_url, download=False)
+                    vinfo = ydv.extract_info(vid_url, download=False) or {}
             except Exception:
                 continue
 
-            # Pega o melhor timestamp disponível
-            ts = (
-                vinfo.get('scheduled_start_time') or
-                vinfo.get('release_timestamp') or
-                vinfo.get('timestamp')
-            )
+            # Título "limpo"
+            titulo_full = (vinfo.get('title') or entry.get('title') or '').strip()
+            titulo_raw = titulo_full.replace('AO VIVO: ', '').split('|')[0].strip()
+            titulo = normalizar_titulo_evento(titulo_raw)
+
+            # ======= Detecção Brasileirão/rodada (usando título + descrição do vinfo) =======
+            descricao = (vinfo.get('description') or '').strip()
+            info_champ = parse_youtube_title(titulo_full, descricao)
+
+            # =========================
+            # FILTRO DE CAMPEONATO
+            # =========================
+            if not (
+                (info_champ.get("is_brasileirao") and info_champ.get("year") == "2026") or
+                info_champ.get("is_copa_mundo") or
+                (info_champ.get("is_paulista") and info_champ.get("year") == "2026")
+            ):
+                continue
+            # =========================
+            # NOME DO CAMPEONATO
+            # =========================
+            if info_champ.get("is_copa_mundo"):
+                champ = (
+                    f'COPA DO MUNDO FIFA {info_champ["year"]}'
+                    if info_champ.get("year")
+                    else 'COPA DO MUNDO FIFA'
+                )
+
+            elif info_champ.get("is_paulista"):
+                champ = (
+                    f'PAULISTÃO {info_champ["year"]}'
+                    if info_champ.get("year")
+                    else 'PAULISTÃO'
+                )
+
+            else:
+                champ = f'BRASILEIRAO {info_champ["year"]}'
+
+            # ======= Timestamp (UTC) -> local =======
+            ts = (vinfo.get('scheduled_start_time') or
+                  vinfo.get('release_timestamp') or
+                  vinfo.get('timestamp'))
+
             if not ts:
                 ds = vinfo.get('release_date') or vinfo.get('upload_date')
                 if ds and len(ds) == 8:
                     try:
-                        ts = int(datetime.strptime(ds, '%Y%m%d').timestamp())
+                        ts = int(datetime.strptime(ds, '%Y%m%d').replace(tzinfo=timezone.utc).timestamp())
                     except Exception:
                         ts = None
             if not ts:
                 continue
 
             try:
-                dt = datetime.fromtimestamp(int(ts))
+                dt_utc = datetime.fromtimestamp(int(ts), tz=timezone.utc)
             except Exception:
                 continue
 
-            # Só futuros (ou explicitamente incoming)
-            if vinfo.get('live_status') != 'is_upcoming' and dt <= datetime.now():
+            # só futuros (ou lives marcadas como "is_upcoming")
+            live_status = vinfo.get('live_status')
+            dt_local = dt_utc.astimezone()
+            
+            # FILTRO DE DATA UI
+            if dt_local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() < data_inicio_obj.timestamp():
                 continue
 
-            if "BRASILEIRÃO 2025" in champ.upper() or "CLUBES DA FIFA" in champ.upper():
-                eventos_futuros.append((
-                    champ, titulo, vid_url, dt.strftime('%d/%m/%Y'), dt.strftime('%H:%M')
-                ))
+            if live_status != 'is_upcoming' and dt_utc <= datetime.now(timezone.utc):
+                continue
+            eventos_futuros.append((
+                champ,
+                titulo,
+                vid_url,
+                dt_local.strftime('%d/%m/%Y'),
+                dt_local.strftime('%H:%M')
+            ))
+
+        # opcional: ordenar por data/hora
+        # eventos_futuros.sort(key=lambda x: (x[3], x[4]))
 
         return eventos_futuros
 
     except Exception as e:
         logging.error(f"Erro ocorrido na coleta do YouTube: {e}")
-        try: habilita_botoes()
-        except Exception: pass
+        try:
+            habilita_botoes()
+        except Exception:
+            pass
         return None
 
+def _to_bool(v):
+    # aceita: "true"/"false", "1"/"0", True/False, 1/0, None
+    if v is None:
+        return False
+    s = str(v).strip().lower()
+    return s in ("1", "true", "yes", "y", "on")
+
 def carrega_config_xml():
-    dados = ler_arquivo_xml("config.xml")
+    try:
+        dados = ler_arquivo_xml("config.xml")
+        if not dados:
+            return
 
-    if dados:
-     
-  
-     email_entry.delete(0, END)
-     refresh_entry.delete(0,END)
-     entry_email2.delete(0,END)
-          
-   
-     email_entry.insert(END,dados["emails"])
-     refresh_entry.insert(END,dados["refresh"])
-     entry_email2.insert(END,dados["hora_automatico"])
-     
+        # =========================
+        # ENTRIES
+        # =========================
+        email_entry.delete(0, END)
+        refresh_entry.delete(0, END)
+        entry_email2.delete(0, END)
 
-     if dados["check_automatico_Email"] == "true":
-         checkbox_ema.set(1)
-     elif dados["check_automatico_Email"] == "false":
-         checkbox_ema.set(0)
+        email_entry.insert(END, dados.get("emails", ""))
+        refresh_entry.insert(END, dados.get("refresh", ""))
+        entry_email2.insert(END, dados.get("hora_automatico", ""))
 
-     if dados["check_automatico_Evento"] == "true":
-         checkbox_grid.set(1)
-     elif dados["check_automatico_Evento"] == "false":
-         checkbox_grid.set(0)
-     
-     if dados.get("somente_relatorio") == "true":
-         checkbox_busca.set(1)
-     else:
-        checkbox_busca.set(0)
+        # =========================
+        # CHECKBOXES PRINCIPAIS
+        # =========================
+        checkbox_ema.set(1 if _to_bool(dados.get("check_automatico_Email")) else 0)
+        checkbox_grid.set(1 if _to_bool(dados.get("check_automatico_Evento")) else 0)
+        checkbox_busca.set(1 if _to_bool(dados.get("somente_relatorio")) else 0)
 
-    if dados["plataforma_dazn"] == "true":
-         checkbox_vars_plat["Dazn"].set(1)
-    elif dados["plataforma_dazn"] == "false":
-         checkbox_vars_plat["Dazn"].set(0)
+        # =========================
+        # PLATAFORMAS (XML → UI)
+        # =========================
+        mapa_plataformas = {
+            "Amazon Prime": "plataforma_prime",
+            "Disney": "plataforma_disney",
+            "Cazé TV": "plataforma_caze",
+            "Dazn": "plataforma_dazn",
+            "Max": "plataforma_max",
+            "CBF": "plataforma_cbf",
+        }
 
-    if dados["plataforma_prime"] == "true":
-         checkbox_vars_plat["Amazon Prime"].set(1)
-    elif dados["plataforma_prime"] == "false":
-         checkbox_vars_plat["Amazon Prime"].set(0)
-    
-    if dados["plataforma_caze"] == "true":
-         checkbox_vars_plat["Caze"].set(1)
-    elif dados["plataforma_caze"] == "false":
-         checkbox_vars_plat["Caze"].set(0)
+        for nome_ui, chave_xml in mapa_plataformas.items():
+            ativo = _to_bool(dados.get(chave_xml))
+            if nome_ui in checkbox_vars_plat:
+                checkbox_vars_plat[nome_ui].set(ativo)
+            if nome_ui in checkbox_states_plat:
+                checkbox_states_plat[nome_ui] = ativo
 
-    if dados["plataforma_disney"] == "true":
-         checkbox_vars_plat["Disney"].set(1)
-    elif dados["plataforma_disney"] == "false":
-         checkbox_vars_plat["Disney"].set(0)
-    
+        update_combobox_text_plat()
+
+        # =========================
+        # CAMPEONATOS (XML → UI)
+        # =========================
+        camp_saved = dados.get("camp_configs", {})
+        for camp_name, val_str in camp_saved.items():
+            ativo_camp = _to_bool(val_str)
+            if camp_name in checkbox_vars_camp:
+                checkbox_vars_camp[camp_name].set(ativo_camp)
+                checkbox_states_camp[camp_name] = ativo_camp
+        
+        update_combobox_text_camp()
+
+    except Exception as e:
+        logging.exception(f"Erro ao carregar config.xml: {e}")
+
+def update_combobox_text_plat():
+    selecionadas = [
+        nome for nome, var in checkbox_vars_plat.items()
+        if var.get()
+    ]
+    if selecionadas:
+        combo_plat.set(", ".join(selecionadas))
+    else:
+        combo_plat.set("Selecione plataformas")
 
 def is_selected_camp(option):
-            return checkbox_states_camp.get(option)
+    return checkbox_states_camp.get(option, False)
 
 def is_selected_plat(option):
-            var = checkbox_vars_plat.get(option, BooleanVar()).get()
-            return var
+    var = checkbox_vars_plat.get(option)
+    return var.get() if var else False
     
 def ler_arquivo_xml(nome_arquivo):
     try:
@@ -1390,28 +2267,46 @@ def ler_arquivo_xml(nome_arquivo):
         root = tree.getroot()
 
         # Extrair usuário e senha
-        usuario_prime = descriptografar(root.find("usuario_prime").text)
-        senha_prime = descriptografar(root.find("senha_prime").text)
-        usuario_disney = descriptografar(root.find("usuario_disney").text)
-        senha_disney = descriptografar(root.find("senha_disney").text)
-        emails = root.find("emails").text
-        refresh = root.find("refresh").text
-        hora_automatico = root.find("hora_automatico").text
-        check_automatico_Email = root.find("check_automatico_Email").text
-        check_automatico_Evento = root.find("check_automatico_Evento").text
-        sr_elem = root.find("somente_relatorio")
-        somente_relatorio = sr_elem.text if sr_elem is not None else "false"
-        plataforma_dazn = root.find("plataforma_dazn").text
-        plataforma_prime = root.find("plataforma_prime").text
-        plataforma_disney = root.find("plataforma_disney").text
-        plataforma_caze = root.find("plataforma_caze").text
+        def safe_find(tag, default=""):
+            elem = root.find(tag)
+            return elem.text if elem is not None else default
+
+        usuario_prime = descriptografar(safe_find("usuario_prime"))
+        senha_prime = descriptografar(safe_find("senha_prime"))
+        usuario_disney = descriptografar(safe_find("usuario_disney"))
+        senha_disney = descriptografar(safe_find("senha_disney"))
+        usuario_max = descriptografar(safe_find("usuario_max"))
+        senha_max = descriptografar(safe_find("senha_max"))
         
+        emails = safe_find("emails")
+        refresh = safe_find("refresh", "20")
+        hora_automatico = safe_find("hora_automatico", "08:00")
+        check_automatico_Email = safe_find("check_automatico_Email", "false")
+        check_automatico_Evento = safe_find("check_automatico_Evento", "false")
+        somente_relatorio = safe_find("somente_relatorio", "false")
+        
+        plataforma_dazn = safe_find("plataforma_dazn", "false")
+        plataforma_prime = safe_find("plataforma_prime", "false")
+        plataforma_disney = safe_find("plataforma_disney", "false")
+        plataforma_max = safe_find("plataforma_max", "false")
+        plataforma_caze = safe_find("plataforma_caze", "false")
+        plataforma_cbf = safe_find("plataforma_cbf", "false")
+        
+        # Campeonatos
+        camp_configs = {}
+        options_camp = ["Brasileirão serie A", "Brasileirão serie B", "Copa do Brasil", "Copa do Mundo", "Mundial de Clubes FIFA", "Campeonato Paulista", "CONMEBOL Libertadores", "CONMEBOL Sudamericana"]
+        for opt in options_camp:
+            tag_name = "camp_" + opt.lower().replace(" ", "_").replace("ã", "a").replace("õ", "o")
+            camp_configs[opt] = safe_find(tag_name, "true")
+
         # Retornar os dados como um dicionário
         return {
             "usuario_prime": usuario_prime,
             "senha_prime": senha_prime,
             "usuario_disney": usuario_disney,
             "senha_disney": senha_disney,
+            "usuario_max": usuario_max,
+            "senha_max": senha_max,
             "emails": emails,
             "refresh": refresh,
             "hora_automatico": hora_automatico,
@@ -1421,21 +2316,25 @@ def ler_arquivo_xml(nome_arquivo):
             "plataforma_dazn": plataforma_dazn,
             "plataforma_prime": plataforma_prime,
             "plataforma_disney": plataforma_disney,
-            "plataforma_caze": plataforma_caze
+            "plataforma_max": plataforma_max,
+            "plataforma_caze": plataforma_caze,
+            "plataforma_cbf": plataforma_cbf,
+            "camp_configs": camp_configs
         }
     except FileNotFoundError:
 
-        label_toolbar.config(text=f"Arquivo '{nome_arquivo}' não encontrado.")
+        text=f"Arquivo '{nome_arquivo}' não encontrado."
         pass
         return None
     except ET.ParseError:
-        label_toolbar.config(text="Erro ao analisar o XML. Verifique o formato do arquivo.")
+        text="Erro ao analisar o XML. Verifique o formato do arquivo."
         pass
         return None
     except Exception as e: 
         logging.error(f"Erro ocorrido: {e}")
         habilita_botoes()
         return {}
+
 def criar_arquivo_xml(nome_arquivo, emails, refresh, hora_automatico, check_automatico_Email, check_automatico_Evento, somente_relatorio):
     # Se o arquivo existir, carregamos
     if os.path.exists(nome_arquivo):
@@ -1459,20 +2358,31 @@ def criar_arquivo_xml(nome_arquivo, emails, refresh, hora_automatico, check_auto
     set_tag("check_automatico_Evento", check_automatico_Evento)
     set_tag("somente_relatorio", somente_relatorio)
 
-    set_tag("plataforma_dazn", "true" if is_selected_plat("Dazn") else "false")
-    set_tag("plataforma_prime", "true" if is_selected_plat("Amazon Prime") else "false")
-    set_tag("plataforma_caze", "true" if is_selected_plat("Caze") else "false")
-    set_tag("plataforma_disney", "true" if is_selected_plat("Disney") else "false")
+    # Plataformas (Força sincronização com checkbox_vars_plat)
+    for plat in ["Dazn", "Amazon Prime", "Cazé TV", "Disney", "Max", "CBF"]:
+        chave = "plataforma_" + plat.lower().replace(" ", "_").replace("cazé", "caze")
+        val = "true" if is_selected_plat(plat) else "false"
+        set_tag(chave, val)
+
+    # Campeonatos
+    options_camp = ["Brasileirão serie A", "Brasileirão serie B", "Copa do Brasil", "Copa do Mundo", "Mundial de Clubes FIFA", "Campeonato Paulista", "CONMEBOL Libertadores", "CONMEBOL Sudamericana"]
+    for opt in options_camp:
+        tag_name = "camp_" + opt.lower().replace(" ", "_").replace("ã", "a").replace("õ", "o")
+        val = "true" if is_selected_camp(opt) else "false"
+        set_tag(tag_name, val)
 
     # Salva no mesmo arquivo
     tree.write(nome_arquivo, encoding="utf-8", xml_declaration=True)
-    label_toolbar.config(text=f"Arquivo XML '{nome_arquivo}' atualizado com sucesso!")
+    logging.info(f"Arquivo XML '{nome_arquivo}' atualizado com sucesso!")
 
 def validar_hora_minuto(texto):
     """ Verifica se o texto inserido está no formato HH:MM """
+    global _ultima_janela_envio
     padrao = r"^(?:[01]\d|2[0-3]):[0-5]\d$"  # Permite 00:00 a 23:59
     if re.match(padrao, texto):
         entry_email2.config(bg="lightgreen")  # Verde se for válido
+        # Se o usuário alterou o horário, resetamos a última janela para permitir teste imediato
+        _ultima_janela_envio = datetime.min
     else:
         entry_email2.config(bg="lightcoral")  # Vermelho se for inválido
 
@@ -1482,25 +2392,46 @@ def validar_hora_minuto(texto):
 def tarefa_diaria():
     global thread_em_execucao
     if thread_em_execucao:
-        label_toolbar.config(text="[INFO] Já está em execução. Ignorado.")
+        logging.info("[INFO] Já está em execução. Ignorado.")
         return
     thread_em_execucao = True
     try:
+        
+        # =====================================================
+        # MODO SOMENTE RELATORIO
+        # =====================================================
+        if checkbox_busca.get():
+            logging.info("[MODO] Somente relatório ativo")
+
+            try:
+                preparar_chrome_esquerda_para_relatorio()
+            except Exception as e:
+                logging.error(f"[RELATORIO] Falha ao preparar Chrome: {e}")     
+                return
+        
         desabilita_botoes()
-        label_toolbar.config(text=f"Executando atividades agendadas. {datetime.now()}")
+        logging.info(f"Executando atividades agendadas. {datetime.now()}")
+        try:
+            label_toolbar.config(text=f"Atividades agendadas em execução: {datetime.now().strftime('%H:%M:%S')}")
+        except Exception:
+            pass
 
         # Só limpa quando realmente for buscar de novo
         if checkbox_grid.get():
             limpar_treeview()
-            run_busca_eventos()
+            run_busca_eventos(ignorar_trava=True)
 
         # Envia relatório com o que houver na grade
         if checkbox_ema.get():
             if tree.get_children():
                 enviar_email()
+                preencher_sharepoint()
             else:
-                label_toolbar.config(text="Nenhum dado encontrado para enviar por e-mail")
                 logging.warning("Tentativa de envio de e-mail sem dados no treeview")
+                try:
+                    label_toolbar.config(text="Nenhum dado encontrado para enviar.")
+                except Exception:
+                    pass
     except Exception as e:
         logging.error(f"Erro em tarefa_diaria: {str(e)}", exc_info=True)
     finally:
@@ -1508,27 +2439,159 @@ def tarefa_diaria():
         thread_em_execucao = False
 
 colunas_excluidas = ["Navegador", "Usuario", "Senha"]
+
+def preencher_sharepoint():
+    from sharepoint_client import push_events_from_tuples
+
+    # Garante padronização canônica e remoção de duplicatas antes de enviar ao SharePoint
+    try:
+        padronizar_nomes_grid(tree)
+        remover_duplicatas(tree)
+    except Exception:
+        pass
+
+    # Filtro de segurança para evitar NoneType
+    rows = [tree.item(iid, "values") for iid in tree.get_children()]
+    rows = [r for r in rows if r and len(r) >= 8]
+
+    if not rows:
+        logging.warning("Não há linhas válidas no grid para enviar ao SharePoint.")
+        try:
+            label_toolbar.config(text="Não há linhas válidas no grid para enviar ao SharePoint.")
+        except Exception:
+            pass
+        return
+
+    try:
+        result = push_events_from_tuples(rows)
+    except Exception as e:
+        logging.exception("Erro em preencher_sharepoint (push_events_from_tuples)")
+        try:
+            label_toolbar.config(text=f"Erro no SharePoint: {e}")
+        except Exception:
+            pass
+        return
+
+    origem = "Direto (Graph API)" if result.get("source") == "direct_graph_api" else "Power Automate (Fallback)"
+    msg = (
+        f"SharePoint ({origem}):\n"
+        f"  Total: {result.get('total')}\n"
+        f"  Inseridos: {result.get('inserted')}\n"
+        f"  Já existiam: {result.get('skipped_existing')}\n"
+        f"  Erros: {len(result.get('errors', []))}"
+    )
+    logging.info(msg)
+    try:
+        label_toolbar.config(text=f"SharePoint ({origem}): Inseridos: {result.get('inserted')}, Já existiam: {result.get('skipped_existing')}")
+    except Exception:
+        pass
+
+
 def extrair_dados_treeview(tree):
-    """ Extrai os dados do Treeview e formata como uma tabela HTML, excluindo colunas específicas. """
-    colunas = [col for col in tree["columns"] if col not in colunas_excluidas]  # Filtra colunas
-    tabela_html = "<table border='1' style='border-collapse: collapse; text-align: left;'>"
-    tabela_html += "<tr style='background-color: #4CAF50; color: white;'>"
+    """
+    Extrai os dados do Treeview e monta um e-mail HTML completo com tabela estilizada,
+    compatível com clientes de e-mail como Outlook e Gmail.
+    """
+    colunas = [col for col in tree["columns"] if col not in colunas_excluidas]
 
-    # Adicionando cabeçalhos
+    # Cabeçalhos da tabela
+    cabecalhos_html = ""
     for col in colunas:
-        tabela_html += f"<th style='padding: 8px;'>{tree.heading(col)['text']}</th>"
-    tabela_html += "</tr>"
+        cabecalhos_html += (
+            f"<th style='padding: 10px 14px; background-color: #2e7d32; color: #ffffff; "
+            f"font-family: Arial, sans-serif; font-size: 13px; font-weight: bold; "
+            f"text-align: center; border: 1px solid #1b5e20; white-space: nowrap;'>"
+            f"{tree.heading(col)['text']}</th>"
+        )
 
-    # Adicionando itens do Treeview
+    # Linhas da tabela
+    linhas_html = ""
     for i, item in enumerate(tree.get_children()):
-        cor_fundo = "#f2f2f2" if i % 2 == 0 else "#ffffff"
-        tabela_html += f"<tr style='background-color: {cor_fundo};'>"
+        cor_fundo = "#f1f8e9" if i % 2 == 0 else "#ffffff"
+        linhas_html += f"<tr style='background-color: {cor_fundo};'>"
         for col in colunas:
-            tabela_html += f"<td style='padding: 8px;'>{tree.set(item, col)}</td>"
-        tabela_html += "</tr>"
+            valor = tree.set(item, col)
+            # Se parecer URL, torna clicável
+            if valor.startswith("http://") or valor.startswith("https://"):
+                valor_celula = (
+                    f"<a href='{valor}' style='color: #1565c0; text-decoration: underline;'>{valor}</a>"
+                )
+            else:
+                valor_celula = valor
+            linhas_html += (
+                f"<td style='padding: 8px 12px; font-family: Arial, sans-serif; font-size: 12px; "
+                f"color: #212121; border: 1px solid #c8e6c9; vertical-align: middle;'>"
+                f"{valor_celula}</td>"
+            )
+        linhas_html += "</tr>"
 
-    tabela_html += "</table>"
-    return tabela_html
+    from datetime import datetime
+    data_geracao = datetime.now().strftime("%d/%m/%Y às %H:%M")
+
+    html = f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Relatório de Eventos - Streaming</title>
+</head>
+<body style="margin: 0; padding: 0; background-color: #f5f5f5; font-family: Arial, sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0"
+         style="background-color: #f5f5f5; padding: 30px 0;">
+    <tr>
+      <td align="center">
+        <table width="900" cellpadding="0" cellspacing="0" border="0"
+               style="background-color: #ffffff; border-radius: 8px;
+                      box-shadow: 0 2px 8px rgba(0,0,0,0.12); overflow: hidden;">
+
+          <!-- Cabeçalho -->
+          <tr>
+            <td style="background-color: #1b5e20; padding: 24px 30px;">
+              <h1 style="margin: 0; color: #ffffff; font-size: 20px; font-weight: bold;
+                          font-family: Arial, sans-serif;">
+                📺 Relatório dos Próximos Eventos no Streaming
+              </h1>
+              <p style="margin: 6px 0 0 0; color: #a5d6a7; font-size: 13px;">
+                Gerado automaticamente em {data_geracao}
+              </p>
+            </td>
+          </tr>
+
+          <!-- Tabela de dados -->
+          <tr>
+            <td style="padding: 20px 20px 10px 20px; overflow-x: auto;">
+              <table width="100%" cellpadding="0" cellspacing="0" border="0"
+                     style="border-collapse: collapse; min-width: 600px;">
+                <thead>
+                  <tr style="background-color: #2e7d32;">
+                    {cabecalhos_html}
+                  </tr>
+                </thead>
+                <tbody>
+                  {linhas_html}
+                </tbody>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Rodapé -->
+          <tr>
+            <td style="background-color: #e8f5e9; padding: 14px 30px; border-top: 1px solid #c8e6c9;">
+              <p style="margin: 0; font-size: 11px; color: #555555; font-family: Arial, sans-serif;">
+                Este e-mail foi gerado automaticamente pelo <strong>Streaming Scheduler</strong>.
+                Não responda a esta mensagem.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
+
+    return html
 
 def validar_emails(email_text):
     """ Separa e valida os e-mails digitados no Entry. """
@@ -1540,11 +2603,11 @@ def validar_emails(email_text):
 
     if emails_invalidos:
         email_entry.config(bg="lightcoral")  # Vermelho se houver e-mails inválidos
-        label_toolbar.config(text=f"E-mails inválidos: {', '.join(emails_invalidos)}")
+        text=f"E-mails inválidos: {', '.join(emails_invalidos)}"
         return None
     else:
         email_entry.config(bg="lightgreen")  # Verde se todos forem válidos
-        label_toolbar.config(text="Todos os e-mails são válidos!")
+        text="Todos os e-mails são válidos!"
         return emails
     
 
@@ -1625,7 +2688,7 @@ def enviar_email(forcar: bool = False):
             destinatarios = []
         if not destinatarios:
             try:
-                label_toolbar.config(text="Nenhum e-mail válido fornecido.")
+                 label_toolbar.config(text="Nenhum e-mail válido fornecido.")
             except Exception:
                 pass
             logging.info("Nenhum e-mail válido fornecido; envio ignorado.")
@@ -1635,7 +2698,7 @@ def enviar_email(forcar: bool = False):
         corpo_email = extrair_dados_treeview(tree)
         if not corpo_email or not str(corpo_email).strip():
             try:
-                label_toolbar.config(text="Nenhum conteúdo para enviar.")
+                 label_toolbar.config(text="Nenhum conteúdo para enviar.")
             except Exception:
                 pass
             logging.info("Nenhum conteúdo para enviar; envio ignorado.")
@@ -1665,7 +2728,7 @@ def enviar_email(forcar: bool = False):
         except Exception as e:
             logging.error(f"Falha ao carregar credenciais de e-mail: {e}")
             try:
-                label_toolbar.config(text="Falha ao carregar credenciais de e-mail.")
+                 label_toolbar.config(text="Falha ao carregar credenciais de e-mail.")
             except Exception:
                 pass
             return
@@ -1696,16 +2759,14 @@ def enviar_email(forcar: bool = False):
                     servidor.sendmail(config["remetente"], destinatarios, msg.as_string())
             except smtplib.SMTPException as e:
                 logging.error(f"Erro SMTP ao enviar e-mail: {e}")
-                try:
-                    label_toolbar.config(text=f"Erro SMTP ao enviar e-mail: {e}")
-                except Exception:
-                    pass
+                
+                label_toolbar.config(text=f"Erro SMTP ao enviar e-mail: {e}")
                 return
         else:
             # Automático desativado — não envia e apenas informa
             logging.info("Envio automático desativado (checkbox).")
             try:
-                label_toolbar.config(text="Envio automático desativado (checkbox desligado).")
+                 label_toolbar.config(text="Envio automático desativado (checkbox desligado).")
             except Exception:
                 pass
             return
@@ -1725,7 +2786,7 @@ def enviar_email(forcar: bool = False):
     except Exception as e:
         logging.exception(f"Erro inesperado em enviar_email: {e}")
         try:
-            label_toolbar.config(text=f"Erro inesperado ao enviar e-mail: {e}")
+             text=f"Erro inesperado ao enviar e-mail: {e}"
         except Exception:
             pass
     finally:
@@ -1749,12 +2810,12 @@ def limpar_arquivo_periodicamente(arquivo):
                 if datetime.now() - ultima_modificacao >= timedelta(days=15):
                     with open(arquivo, "w") as f:
                         f.write("")  # Limpa o arquivo
-                    label_toolbar.config(text=f"O arquivo '{arquivo}' foi limpo em: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')} ")
+                    text=f"O arquivo '{arquivo}' foi limpo em: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')} "
              
             else:
                 with open(arquivo, "w") as f:
                     f.write("")  # Cria o arquivo vazio
-                label_toolbar.config(text=f"O arquivo '{arquivo}' não existia, então foi criado e limpo!")
+                text=f"O arquivo '{arquivo}' não existia, então foi criado e limpo!"
 
             time.sleep(24 * 60 * 60)  # Aguarda 24 horas antes de verificar novamente
 
@@ -1770,7 +2831,7 @@ def get_eventos():
 def fechar_instancia(nome_programa):
     for processo in psutil.process_iter(attrs=["name", "pid"]):
         if processo.info["name"] == nome_programa:
-            label_toolbar.config(text=f"Fechando instância existente de {nome_programa} (PID: {processo.info['pid']})...")
+            text=f"Fechando instância existente de {nome_programa} (PID: {processo.info['pid']})..."
             psutil.Process(processo.info["pid"]).terminate()  # Finaliza o processo
             time.sleep(2)  # Aguarda para garantir que o processo foi encerrado
 
@@ -1791,10 +2852,30 @@ def _abrir_chrome(porta: str, profile_dir: str) -> None:
             "--remote-debugging-address=127.0.0.1",     # <<< adição
             f"--remote-debugging-port={porta}",
             f"--user-data-dir={profile_dir}",
+            "--profile-directory=Default",
+            "--disable-features=SkipProfilePicker",
             "--no-first-run", "--no-default-browser-check"
         ])
     except Exception as e:
         logging.error(f"Falha ao abrir Chrome na porta {porta}: {e}")
+
+def fechar_chrome_por_porta(porta_debug):
+    """Finaliza apenas a instância do Chrome rodando na porta de depuração especificada."""
+    import psutil
+    target = f"--remote-debugging-port={porta_debug}"
+    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+        try:
+            if proc.info['name'] and 'chrome' in proc.info['name'].lower():
+                cmdline = proc.info.get('cmdline') or []
+                if any(target in arg for arg in cmdline):
+                    logging.info(f"Finalizando Chrome na porta {porta_debug} (PID: {proc.info['pid']})")
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=3)
+                    except psutil.TimeoutExpired:
+                        proc.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
 
 
 
@@ -1870,19 +2951,595 @@ def verificar_chrome_debug(porta_debug: str) -> bool:
 
     
 
-def run_eventos_dazn(url_camp):
+def deep_normalize_match(match_name):
+    """
+    Normaliza nomes de jogos de forma profunda para detectar duplicatas como
+    'Vasco x São Paulo' vs 'Vasco da Gama x São Paulo'.
+    Suporta variações de acentos, sufixos (E.C, F.C) e nomes curtos/longos.
+    """
+    import unicodedata
+    import re
+    
+    def norm_team(t):
+        if not t: return ""
+        t = t.lower()
+        # Remove acentos primeiro para facilitar as substituições
+        t = "".join(c for c in unicodedata.normalize('NFD', t) if unicodedata.category(c) != 'Mn')
+        
+        # Substitui hífens, pontos e símbolos por espaço PRIMEIRO para evitar descompassos como Atletico-MG vs Atletico MG
+        t = t.replace("-", " ").replace(".", " ").replace("_", " ")
+
+        # Mapeamento de normalização de times
+        # Substitui variações comuns por um termo canônico
+        replacements = {
+            r"\bvasco da gama\b": "vasco",
+            r"\bathletico paranaense\b": "athletico",
+            r"\batletico paranaense\b": "athletico",
+            r"\bathletico pr\b": "athletico",
+            r"\batletico pr\b": "athletico",
+            r"\batletico mineiro\b": "atletico",
+            r"\batletico mg\b": "atletico",
+            r"\batletico goianiense\b": "atletico go",
+            r"\batletico go\b": "atletico go",
+            r"\bred bull bragantino\b": "bragantino",
+            r"\brb bragantino\b": "bragantino",
+            r"\besporte clube\b": "",
+            r"\be c\b": "",
+            r"\bf c\b": "",
+            r"\bfc\b": "",
+            r"\bec\b": "",
+            r"\bsaf\b": "",
+            r"\bclube de regatas\b": "",
+        }
+        
+        for pattern, rep in replacements.items():
+            t = re.sub(pattern, rep, t)
+            
+        # Remove espaços duplos e garante trim
+        t = re.sub(r'\s+', ' ', t).strip()
+        return t
+
+    # Garante que o separador seja ' x ' minúsculo para o split
+    text_work = re.sub(r'\s+[vVxX]\s+', ' x ', match_name)
+    parts = text_work.lower().split(" x ")
+    
+    if len(parts) >= 2:
+        t1, t2 = norm_team(parts[0]), norm_team(parts[1])
+        # Retorna uma tupla ordenada para garantir que 'A x B' == 'B x A'
+        return tuple(sorted([t1, t2]))
+    return (norm_team(match_name),)
+
+def canonical_team_name(t):
+    if not t: return ""
+    original = t.strip()
+    
+    # Normalização básica para comparação
+    t_lower = t.lower()
+    t_lower = "".join(c for c in unicodedata.normalize('NFD', t_lower) if unicodedata.category(c) != 'Mn')
+    t_lower = t_lower.replace("-", " ").replace(".", " ").replace("_", " ")
+    
+    # Dicionário de padronização (Formato Bonito)
+    canonical_map = {
+        r"\bvasco da gama\b": "Vasco da Gama",
+        r"\bvasco\b": "Vasco da Gama",
+        
+        r"\bathletico paranaense\b": "Athletico-PR",
+        r"\batletico paranaense\b": "Athletico-PR",
+        r"\bathletico pr\b": "Athletico-PR",
+        r"\batletico pr\b": "Athletico-PR",
+        r"\bathletico\b": "Athletico-PR",
+        
+        r"\batletico mineiro\b": "Atlético-MG",
+        r"\batletico mg\b": "Atlético-MG",
+        r"\batletico\b": "Atlético-MG",
+        
+        r"\batletico goianiense\b": "Atlético-GO",
+        r"\batletico go\b": "Atlético-GO",
+        
+        r"\bred bull bragantino\b": "Red Bull Bragantino",
+        r"\brb bragantino\b": "Red Bull Bragantino",
+        r"\bbragantino\b": "Red Bull Bragantino",
+        
+        r"\bcorinthians paulista\b": "Corinthians",
+        r"\bsc corinthians\b": "Corinthians",
+        
+        r"\bsao paulo fc\b": "São Paulo",
+        r"\bsao paulo\b": "São Paulo",
+        
+        r"\bpalmeiras\b": "Palmeiras",
+        r"\bse palmeiras\b": "Palmeiras",
+        
+        r"\bflamengo\b": "Flamengo",
+        r"\bcr flamengo\b": "Flamengo",
+        
+        r"\bfluminense fc\b": "Fluminense",
+        r"\bfluminense\b": "Fluminense",
+        
+        r"\bbotafogo fr\b": "Botafogo",
+        r"\bbotafogo rj\b": "Botafogo",
+        r"\bbotafogo\b": "Botafogo",
+        
+        r"\bgremio fbpa\b": "Grêmio",
+        r"\bgremio\b": "Grêmio",
+        
+        r"\binternacional\b": "Internacional",
+        r"\bsc internacional\b": "Internacional",
+        
+        r"\bcruzeiro ec\b": "Cruzeiro",
+        r"\bcruzeiro\b": "Cruzeiro",
+        
+        r"\bjuventude\b": "Juventude",
+        r"\bec juventude\b": "Juventude",
+        
+        r"\bfortaleza ec\b": "Fortaleza",
+        r"\bfortaleza\b": "Fortaleza",
+        
+        r"\bcuiaba ec\b": "Cuiabá",
+        r"\bcuiaba\b": "Cuiabá",
+        
+        r"\bbahia\b": "Bahia",
+        r"\bec bahia\b": "Bahia",
+        
+        r"\bvitoria\b": "Vitória",
+        r"\bec vitoria\b": "Vitória",
+        
+        r"\bceara sc\b": "Ceará",
+        r"\bceara\b": "Ceará",
+        
+        r"\bsport recife\b": "Sport",
+        r"\bsport club do recife\b": "Sport",
+        r"\bsport\b": "Sport",
+        
+        r"\bcoritiba fcf\b": "Coritiba",
+        r"\bcoritiba\b": "Coritiba",
+        
+        r"\bgoias\b": "Goiás",
+        r"\bgoias ec\b": "Goiás",
+        
+        r"\bamerica mineiro\b": "América-MG",
+        r"\bamerica mg\b": "América-MG",
+        r"\bamerica\b": "América-MG",
+        
+        r"\bchapecoense af\b": "Chapecoense",
+        r"\bchapecoense\b": "Chapecoense",
+    }
+    
+    # Remove prefixos inúteis
+    t_clean = re.sub(r"\besporte clube\b|\be c\b|\bf c\b|\bfc\b|\bec\b|\bsaf\b|\bclube de regatas\b", "", t_lower)
+    t_clean = re.sub(r'\s+', ' ', t_clean).strip()
+    
+    # Aplica o mapa para achar o nome bonito
+    for pattern, pretty_name in canonical_map.items():
+        if re.search(pattern, t_clean):
+            return pretty_name
+            
+    # Se não achar no mapa, retorna o original formatado como Título
+    return original.title()
+
+def prettify_match_name(match_name):
+    """
+    Recebe um nome de partida possivelmente bagunçado (ex: 'Atlético MG x Juventude')
+    e converte para um padrão visual único (ex: 'Atlético-MG x Juventude').
+    Isso previne que o SharePoint gere chaves duplicadas (ChaveEvento) devido a variações no nome!
+    """
+    text_work = re.sub(r'\s+[vVxX]\s+', ' x ', match_name)
+    parts = text_work.split(" x ")
+    if len(parts) >= 2:
+        t1, t2 = canonical_team_name(parts[0]), canonical_team_name(parts[1])
+        return f"{t1} x {t2}"
+    return canonical_team_name(match_name)
+
+def padronizar_nomes_grid(tree):
+    """
+    Varre todo o grid e substitui os nomes de partidas pelos nomes canônicos e bonitos.
+    Deve ser chamada antes do SharePoint ou da remoção de duplicatas.
+    """
+    try:
+        for item in tree.get_children():
+            values = list(tree.item(item, 'values'))
+            if len(values) > 1:
+                nome_original = str(values[1])
+                nome_bonito = prettify_match_name(nome_original)
+                if nome_original != nome_bonito:
+                    values[1] = nome_bonito
+                    tree.item(item, values=values)
+    except Exception as e:
+        import logging
+        logging.error(f"Erro em padronizar_nomes_grid: {e}")
+
+def is_match_already_in_tree(jogo_nome, data_str):
+    """
+    Verifica se um jogo já existe no Treeview para a mesma data usando match fuzzy.
+    """
+    if not tree: return False
+    
+    jogo_norm = deep_normalize_match(jogo_nome)
+    
+    try:
+        for item in tree.get_children():
+            values = tree.item(item, "values")
+            if len(values) > 2:
+                # Compara Jogo (idx 1) e Data (idx 2)
+                # Compara Jogo (idx 1) e Data (idx 2) usando normalização profunda
+                if deep_normalize_match(str(values[1])) == jogo_norm and str(values[2]) == data_str:
+                    return True
+    except Exception:
+        pass
+    return False
+
+def get_latest_cbf_url(comp_type):
+    """
+    Busca dinamicamente o link mais recente da Tabela Detalhada no site da CBF usando Selenium headless.
+    """
+    if comp_type == "BSA":
+        url = "https://www.cbf.com.br/futebol-brasileiro/tabelas/campeonato-brasileiro/serie-a/2026"
+    elif comp_type == "CDB":
+        url = "https://www.cbf.com.br/futebol-brasileiro/tabelas/copa-do-brasil/masculino/2026"
+    else:
+        return None
+
+    logging.info(f"[CBF] Buscando URL dinâmica para {comp_type} em {url}...")
+    
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    from webdriver_manager.chrome import ChromeDriverManager
+
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    
+    driver = None
+    try:
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        driver.get(url)
+        time.sleep(6) # Aguarda renderização Next.js/React dos links
+        
+        links = driver.find_elements(By.TAG_NAME, "a")
+        for a in links:
+            try:
+                href = a.get_attribute("href")
+                if href and ("Tabela_Detalhada" in href or "tabela_detalhada" in href) and href.endswith(".pdf"):
+                    logging.info(f"[CBF] URL dinâmica encontrada para {comp_type}: {href}")
+                    return href
+            except:
+                pass
+    except Exception as e:
+        logging.error(f"[CBF] Erro ao buscar URL dinâmica da CBF ({comp_type}) usando Selenium: {e}")
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except:
+                pass
+                
+    # Fallback para URLs atualizadas se a busca falhar ou der erro
+    fallbacks = {
+        "BSA": "https://stcbfsiteprdimgbrs.blob.core.windows.net/img-site/cdn/Tabela_Detalhada_BSA_2026_06_07_db8090e380.pdf",
+        "CDB": "https://stcbfsiteprdimgbrs.blob.core.windows.net/img-site/cdn/Tabela_Detalhada_Copa_do_Brasil_2026_08_07_8dfc6382ed.pdf"
+    }
+    logging.info(f"[CBF] Usando fallback para {comp_type}: {fallbacks.get(comp_type)}")
+    return fallbacks.get(comp_type)
+
+def run_eventos_cbf():
+    """
+    Nova lógica consolidada para extração via PDF da CBF.
+    Utiliza URLs diretas para máxima velocidade ("preenche em segundos").
+    """
+    logging.info("Iniciando run_eventos_cbf...")
+    try:
+        label_toolbarprocess.config(text="Atualização CBF (PDF)")
+        progresso["value"] = 0
+        progresso.pack(side=RIGHT, padx=10, pady=5)
+        
+        camps_to_process = []
+        if is_selected_camp("Brasileirão serie A"):
+            url_bsa = get_latest_cbf_url("BSA")
+            camps_to_process.append({
+                "nome": "Brasileirão Série A",
+                "url_pdf": url_bsa
+            })
+        if is_selected_camp("Copa do Brasil"):
+            url_cdb = get_latest_cbf_url("CDB")
+            camps_to_process.append({
+                "nome": "Copa do Brasil",
+                "url_pdf": url_cdb
+            })
+
+        if not camps_to_process:
+            return
+
+        for camp_info in camps_to_process:
+            progresso["value"] += 20
+            label_toolbarprocess.config(text=f"Baixando PDF: {camp_info['nome']}")
+            
+            try:
+                # Download ultrarrápido via requests
+                headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+                resp = requests.get(camp_info['url_pdf'], headers=headers, verify=False, timeout=15)
+                
+                if resp.status_code != 200 or len(resp.content) < 5000:
+                    logging.warning(f"PDF {camp_info['nome']} indisponível ou inválido (Status: {resp.status_code}, Tamanho: {len(resp.content)})")
+                    continue
+
+                pdf_path = f"temp_{camp_info['nome'].replace(' ', '_')}.pdf"
+                with open(pdf_path, "wb") as f:
+                    f.write(resp.content)
+                
+                # Parsing do PDF usando o parser já validado
+                extracted = parse_cbf_pdf(pdf_path, camp_info['nome'])
+                logging.info(f"PDF {camp_info['nome']} extraiu {len(extracted)} jogos totais.")
+                
+                # Obtendo data inicial da UI para filtro
+                try:
+                    data_inicio_str = entry_data.get()
+                    data_inicio_obj = datetime.strptime(data_inicio_str, "%d/%m/%Y")
+                except:
+                    data_inicio_obj = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+                var_navegador = "Esquerda"
+                cont_inseridos = 0
+                for ev in extracted:
+                    # 🔥 REGRA: Diminuir 1 hora de todos os jogos da CBF (PDF) e ajustar a data se mudar de dia
+                    data_ajustada = ev['Data']
+                    hora_ajustada = ev['Hora']
+                    try:
+                        dt_combined = None
+                        for fmt_h in ("%H:%M", "%H:%M:%S"):
+                            try:
+                                dt_combined = datetime.strptime(f"{ev['Data']} {ev['Hora']}", f"%d/%m/%Y {fmt_h}")
+                                break
+                            except:
+                                pass
+                        if dt_combined:
+                            dt_ajustada = dt_combined - timedelta(hours=1)
+                            data_ajustada = dt_ajustada.strftime("%d/%m/%Y")
+                            hora_ajustada = dt_ajustada.strftime("%H:%M")
+                    except Exception as e:
+                        logging.warning(f"Erro ao ajustar data/hora do PDF ({ev['Data']} {ev['Hora']}): {e}")
+
+                    # Filtro de Data (Somente eventos futuros/atuais) usando a data ajustada
+                    try:
+                        ev_date_obj = datetime.strptime(data_ajustada, "%d/%m/%Y")
+                        if ev_date_obj < data_inicio_obj:
+                            continue
+                    except:
+                        continue
+                    
+                    # 🔥 REGRA DE PRIORIDADE: Se já existir no grid (Selenium), ignora o PDF (compara com data original e ajustada)
+                    if is_match_already_in_tree(ev['Jogo'], ev['Data']) or is_match_already_in_tree(ev['Jogo'], data_ajustada):
+                        logging.info(f"Ignorando duplicata PDF (Já no grid): {ev['Jogo']} em {ev['Data']} / {data_ajustada}")
+                        continue
+
+                    plataformas_evento = [p.strip() for p in ev['TV'].split(',')]
+                    # Se 'CBF' estiver selecionado, mostra tudo do PDF da CBF.
+                    # Senão, filtra pelas plataformas individuais (Amazon, Cazé, etc)
+                    mostrar = is_selected_plat("CBF")
+                    if not mostrar:
+                        for plat_ev in plataformas_evento:
+                            if is_selected_plat(plat_ev):
+                                mostrar = True
+                                break
+                    
+                    if mostrar:
+                        plat_display = plataformas_evento[0] if plataformas_evento else "CBF"
+                        cbf_nome = camp_info['nome']
+                        cbf_camp = f"CBF - {cbf_nome}" if "CBF" not in cbf_nome.upper() else cbf_nome
+                        jogo_bonito = prettify_match_name(ev['Jogo'])
+                        row = (cbf_camp, jogo_bonito, data_ajustada, hora_ajustada, var_navegador, "15", plat_display, camp_info['url_pdf'])
+                        tree.insert("", "end", values=row)
+                        var_navegador = "Direita" if var_navegador == "Esquerda" else "Esquerda"
+                        cont_inseridos += 1
+                
+                logging.info(f"PDF {camp_info['nome']}: Inseridos {cont_inseridos} jogos após filtro de data.")
+
+            except Exception as e:
+                logging.error(f"Erro ao processar PDF {camp_info['nome']}: {e}")
+
+        # --- ADIÇÃO: CBF - Copa do Mundo FIFA 2026 (via Excel Local) ---
+        if is_selected_plat("CBF"):
+            try:
+                xls_path = os.path.join(os.getcwd(), "Tabela_Completa_Copa_Mundo_2026_Fase_Grupos.xlsx")
+                if os.path.exists(xls_path):
+                    logging.info(f"Processando Tabela Excel CBF - Copa do Mundo FIFA 2026: {xls_path}")
+                    import pandas as pd
+                    df = pd.read_excel(xls_path)
+                    
+                    # Identificação de colunas (Data, Hora, Jogo)
+                    col_data = next((c for c in df.columns if 'DATA' in str(c).upper()), None)
+                    col_hora = next((c for c in df.columns if 'HORA' in str(c).upper()), None)
+                    col_jogo = next((c for c in df.columns if 'JOGO' in str(c).upper()), None)
+                    
+                    if col_data and col_hora and col_jogo:
+                        # Data de início para filtro (da UI)
+                        try:
+                            data_inicio_str = entry_data.get()
+                            data_inicio_obj = datetime.strptime(data_inicio_str, "%d/%m/%Y")
+                        except:
+                            data_inicio_obj = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+                        var_navegador_xls = "Esquerda"
+                        cont_inseridos_xls = 0
+                        
+                        for _, row in df.iterrows():
+                            data_raw = str(row[col_data]).strip()
+                            hora_raw = str(row[col_hora]).strip()
+                            jogo_raw = str(row[col_jogo]).strip()
+                            
+                            if not jogo_raw or jogo_raw == "nan" or jogo_raw == "None": continue
+
+                            # Normalização de data
+                            try:
+                                if " " in data_raw: data_raw = data_raw.split(" ")[0]
+                                if "-" in data_raw:
+                                    dt_obj = datetime.strptime(data_raw, "%Y-%m-%d")
+                                    data_formatada = dt_obj.strftime("%d/%m/%Y")
+                                else:
+                                    data_formatada = data_raw
+                            except:
+                                data_formatada = data_raw
+                                
+                            # Ajuste de -2 horas conforme solicitado e correção de data se mudar de dia
+                            data_ajustada = data_formatada
+                            hora_ajustada = hora_raw
+                            try:
+                                dt_combined = None
+                                for fmt_h in ("%H:%M", "%H:%M:%S"):
+                                    try:
+                                        dt_combined = datetime.strptime(f"{data_formatada} {hora_raw}", f"%d/%m/%Y {fmt_h}")
+                                        break
+                                    except:
+                                        pass
+                                if dt_combined:
+                                    dt_ajustada = dt_combined - timedelta(hours=2)
+                                    data_ajustada = dt_ajustada.strftime("%d/%m/%Y")
+                                    hora_ajustada = dt_ajustada.strftime("%H:%M")
+                            except Exception as e:
+                                logging.warning(f"Erro ao ajustar data/hora em Copa do Mundo Excel ({data_formatada} {hora_raw}): {e}")
+
+                            # Filtro de data futura usando a data ajustada
+                            try:
+                                ev_date_obj = datetime.strptime(data_ajustada, "%d/%m/%Y")
+                                if ev_date_obj < data_inicio_obj:
+                                    continue
+                            except:
+                                pass
+                                
+                            # 🔥 REGRA DE PRIORIDADE: Se já existir no grid (Selenium), ignora o Excel (compara com data original e ajustada)
+                            if is_match_already_in_tree(jogo_raw, data_raw) or is_match_already_in_tree(jogo_raw, data_ajustada):
+                                logging.info(f"Ignorando duplicata Excel (Já no grid): {jogo_raw} em {data_raw} / {data_ajustada}")
+                                continue
+
+                            # Inserção no grid (Forçando 'Cazé TV' e URL do YouTube)
+                            caze_url = "https://www.youtube.com/@CazeTV/streams"
+                            jogo_bonito_xls = prettify_match_name(jogo_raw)
+                            row_data = ("CBF - Copa do Mundo FIFA 2026", jogo_bonito_xls, data_ajustada, hora_ajustada, var_navegador_xls, "15", "Cazé TV", caze_url)
+                            tree.insert("", "end", values=row_data)
+                            var_navegador_xls = "Direita" if var_navegador_xls == "Esquerda" else "Esquerda"
+                            cont_inseridos_xls += 1
+                            
+                        logging.info(f"Excel Copa do Mundo: Inseridos {cont_inseridos_xls} jogos.")
+                else:
+                    logging.warning(f"Arquivo de Tabela da Copa do Mundo não encontrado: {xls_path}")
+            except Exception as e:
+                logging.error(f"Erro ao processar Excel Copa do Mundo: {e}")
+
+        padronizar_nomes_grid(tree)
+        remover_duplicatas(tree)
+        progresso["value"] = 100
+        label_toolbarprocess.config(text="CBF Atualizado!")
+        time.sleep(1)
+        progresso.pack_forget()
+
+    except Exception as e:
+        logging.error(f"Erro em run_eventos_cbf: {e}")
+
+def parse_cbf_pdf(pdf_path, nome_original):
+    """
+    Parser refinado e validado para os PDFs da CBF 2026.
+    Extrai Jogo, Data, Hora e TV (Amazon Prime / Cazé TV).
+    """
+    try:
+        logging.info(f"Processando PDF CBF: {pdf_path}")
+        import pypdfium2 as pdfium
+        doc = pdfium.PdfDocument(pdf_path)
+        full_text = ""
+        for i in range(len(doc)):
+            page = doc.get_page(i)
+            textpage = page.get_textpage()
+            full_text += textpage.get_text_bounded() + "\n"
+            textpage.close()
+            page.close()
+        doc.close()
+        
+        if "Copa do Brasil" in nome_original:
+            legend = {"3": "Amazon Prime"}
+            target_ids = ["3"]
+        else: # Brasileirão Série A
+            legend = {"4": "Amazon Prime", "5": "Cazé TV"}
+            target_ids = ["4", "5"]
+        
+        lines = full_text.split("\n")
+        current_date = ""
+        extracted = []
+        
+        for line in lines:
+            line = line.strip()
+            if not line: continue
+               
+            # Procura por data: dd/mm seg|ter|...
+            date_match = re.search(r'(\d{2}/\d{2})\s+(?:seg|ter|qua|qui|sex|sáb|sab|dom)', line, re.I)
+            if date_match:
+                current_date = date_match.group(1) + "/2026"
+               
+            if " x " in line:
+                # Procura por horário: hh:mm
+                time_match = re.search(r'(\d{2}:\d{2})', line)
+                if time_match:
+                    hora = time_match.group(1)
+                    
+                    # Pula se já tiver placar (jogo passado)
+                    if re.search(r'\b\d+\s+x\s+\d+\b', line): continue
+                    if re.search(r'\(\d+\)', line): continue
+                    
+                    parts = line.split(" x ")
+                    if len(parts) >= 2:
+                        all_nums_pt2 = re.findall(r'\b(\d+)\b', parts[1])
+                        relevant_nums = [n for n in all_nums_pt2 if n in target_ids]
+                        logging.debug(f"Linha Jogo: {line} | IDs encontrados: {all_nums_pt2} | Relevantes: {relevant_nums}")
+                        
+                        if not relevant_nums:
+                            continue
+                        
+                        tv_str = ", ".join([legend.get(n, n) for n in relevant_nums])
+
+                    # Limpeza de nomes
+                    pt1 = parts[0]
+                    # Remove hora se estiver no início do nome do time 1
+                    m_time = re.search(r'\d{2}:\d{2}', pt1)
+                    if m_time: pt1 = pt1[m_time.end():].strip()
+                    # Remove números de ID no início
+                    pt1 = re.sub(r'^\d+\s+', '', pt1).strip()
+                    # Remove placares entre parênteses
+                    pt1 = re.sub(r'\(.*?\)', '', pt1).strip()
+                    # Remove UF (estado)
+                    pt1 = re.sub(r'\b[A-Z]{2}\b$', '', pt1).strip()
+                    pt1 = re.sub(r'\b[A-Z]{2}\b', '', pt1).strip()
+                    
+                    pt2 = parts[1]
+                    pt2 = re.sub(r'\(.*?\)', '', pt2).strip()
+                    # Remove UF e tudo que vem depois no time 2 (Estádio, Cidade, Canal)
+                    pt2 = re.sub(r'\s[A-Z]{2}\b.*$', '', pt2).strip()
+                    jogo_clean = f"{pt1} x {pt2}"
+                    
+                    extracted.append({
+                        "Camp": nome_original, # Mantém o nome limpo aqui
+                        "Jogo": jogo_clean,
+                        "Data": current_date,
+                        "Hora": hora,
+                        "TV": tv_str
+                    })
+        return extracted
+    except Exception as e:
+        logging.error(f"Erro no parser PDF CBF: {e}")
+        return []
+
+def run_eventos_dazn(url_camp, expected_camp="Mundial de Clubes FIFA"):
 
   try:   
         #  Usa o navegador da esquerda para buscar a lista
         label_toolbarprocess.config(text="Atualização de eventos do Dazn")
-        label_toolbar.config(text="Realizando a atualização dos grids com os eventos do Dazn...")
+        text="Realizando a atualização dos grids com os eventos do Dazn..."
         progresso["value"] = 0
         #    Exibe progressbar
         progresso.pack(side=RIGHT, padx=10, pady=5)
 
         if not verificar_chrome_debug("9222"):
             habilita_botoes()
-            label_toolbar.config(text="Chrome (9222) indisponível.")
+            text="Chrome (9222) indisponível."
             return
    
 
@@ -1906,144 +3563,318 @@ def run_eventos_dazn(url_camp):
         var_navegador = "Esquerda"
 
         # Abre na url do campeonato em questão selecionado
-        label_toolbar.config(text="Abrindo pagina do campeonato...")
+        text="Abrindo pagina do campeonato..."
         progresso["value"] = progresso["value"] + 5
         logindazn(url_camp,us,pas,driverchrome1,10,"Novos")
         
-        label_toolbar.config(text="Limpando o grid...")
+        text="Limpando o grid..."
         delete_null_items()
        
-        label_toolbar.config(text="Atualizando lista do campeonato Dazn...")
+        text="Atualizando lista do campeonato Dazn..."
         progresso["value"] = progresso["value"] + 5
          # Procura elmento principal dos proximos eventos
         
         
         eventos = obter_eventos_dazn_completo(driverchrome1)
     
+        # Obtendo data inicial da UI para filtro
+        try:
+            data_inicio_str = entry_data.get()
+            data_inicio_obj = datetime.strptime(data_inicio_str, "%d/%m/%Y")
+        except:
+            data_inicio_obj = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
         for evento in eventos:
-            campeonato = "Mundial de Cluber FiFA"
-            jogo = evento["Jogo"].upper()
+            campeonato = expected_camp or "Mundial de Clubes FIFA"
+            import re
+            jogo = re.sub(r'\s+[vVxX]\s+', ' x ', evento["Jogo"]).upper()
             data_hora = evento["Data/hora"]
             url = evento["URL"]
             plataforma = "Dazn"
             minutos_antes = "15"
             data = data_hora.split(" ")[0]
             hora = data_hora.split(" ")[1]
+            
+            # FILTRO DE DATA
+            try:
+                ev_date_obj = datetime.strptime(data, "%d/%m/%Y")
+                if ev_date_obj < data_inicio_obj:
+                    continue
+            except:
+                pass
                         
-            csv_list = (campeonato,jogo,data,hora,var_navegador,minutos_antes,plataforma,url)
-            tree.insert("", "end", values=csv_list)
-
-            if var_navegador == "Esquerda":
-             var_navegador = "Direita"
-            elif var_navegador == "Direita":
-                var_navegador = "Esquerda"
             list_b.append(csv_list)                  
         
-  except UnboundLocalError as e:
+  except Exception as e: 
        logging.error(f"Erro ocorrido: {e}")  # Registra o erro no log
        exc_type, exc_obj, exc_tb = sys.exc_info()
        fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
        habilita_botoes()
        update_command() 
        pass     
-
-  except FileNotFoundError as e:
-        logging.error(f"Arquivo não encontrado = {e}")
-  except Exception as e: 
-   logging.error(f"Erro ocorrido: {e}")  # Registra o erro no log
-   exc_type, exc_obj, exc_tb = sys.exc_info()
-   fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-   habilita_botoes()
-   update_command()
-   pass
   
 
-def format_datetime(data_str):
+MESES_PT = {
+    "jan": 1,
+    "fev": 2,
+    "mar": 3,
+    "abr": 4,
+    "mai": 5,
+    "jun": 6,
+    "jul": 7,
+    "ago": 8,
+    "set": 9,
+    "out": 10,
+    "nov": 11,
+    "dez": 12,
+}
+
+def format_datetime(data_str, base_date=None):
+    """
+    Converte strings de data/hora vindas das plataformas (Prime/Max/etc)
+    para {"data": "dd/mm/YYYY", "hora": "HH:MM"}.
+
+    Suporta:
+      - Max PT-BR curto: "sáb., 14:55"
+      - Max PT-BR completo: "18 de jan., 16:55"
+      - PT-BR literal: "Hoje: 20:40", "Amanhã: 21:10"
+      - Prime/Outros: "Live At 7 PM", "Tomorrow 7:30 PM", "Wed, Jul 30 7 PM", etc.
+
+    base_date (opcional):
+      - pode ser datetime/date ou string "dd/mm/yyyy".
+      - Para o formato curto do Max ("sáb., 14:55") usamos ref = max(now, base_date)
+        para NÃO voltar no tempo e bater com o “próximo sábado” real da agenda.
+    """
     try:
         if not data_str:
             return {"data": "", "hora": ""}
 
-        data_str = data_str.strip().title().replace("Pm", "PM").replace("Am", "AM")
-        data_str = re.sub(r'\s+', ' ', data_str)
-        data_str = re.sub(r'(\b[AP]M):00\b', r'\1', data_str)  # corrige "7 PM:00" -> "7 PM"
+        # ---------- helpers ----------
+        def _clean(s: str) -> str:
+            s = s.replace("\u00a0", " ")
+            for ch in ("\u200b", "\u200c", "\u200d", "\ufeff", "\u2066", "\u2067", "\u2068", "\u2069"):
+                s = s.replace(ch, "")
+            s = re.sub(r"\s+", " ", s).strip()
+            return s
+
+        def _parse_base_date(bd):
+            if bd is None:
+                return None
+            if isinstance(bd, datetime):
+                return bd
+            try:
+                from datetime import date as _date
+                if isinstance(bd, _date):
+                    return datetime(bd.year, bd.month, bd.day)
+            except Exception:
+                pass
+            if isinstance(bd, str):
+                try:
+                    return datetime.strptime(bd.strip(), "%d/%m/%Y")
+                except Exception:
+                    return None
+            return None
+
+        # ---------- normalização inicial ----------
+        original = data_str
+        data_str = _clean(str(data_str))
+
+        # Tradução manual de meses/dias (Inglês -> Português) para Prime Video
+        eng_pt = {
+            'jan': 'jan', 'feb': 'fev', 'mar': 'mar', 'apr': 'abr', 'may': 'mai', 'jun': 'jun',
+            'jul': 'jul', 'aug': 'ago', 'sep': 'set', 'oct': 'out', 'nov': 'nov', 'dec': 'dez',
+            'mon': 'seg', 'tue': 'ter', 'wed': 'qua', 'thu': 'qui', 'fri': 'sex', 'sat': 'sab', 'sun': 'dom'
+        }
+        for eng, pt in eng_pt.items():
+            data_str = re.sub(rf'\b{eng}\b', pt, data_str, flags=re.IGNORECASE)
+
+        # 🔧 PATCH DEFINITIVO Hoje / Amanhã
+        data_str = (
+            data_str
+            .replace("Hoje:", "Hoje: ")
+            .replace("Amanhã:", "Amanhã: ")
+        )
 
         now = datetime.now()
+        bd_dt = _parse_base_date(base_date)
 
-        # Live at → define data como hoje
-        if data_str.startswith("Live At "):
-            hora = data_str.replace("Live At ", "").strip()
+        # =====================================================
+        # 🇧🇷 HOJE / AMANHÃ (PT-BR literal)
+        # =====================================================
+        low = data_str.lower()
+
+        if low.startswith("hoje"):
             try:
-                hora_obj = datetime.strptime(hora, "%I:%M %p")
-            except ValueError:
-                hora_obj = datetime.strptime(hora, "%I %p")  # Ex: "7 PM"
+                # "Hoje: 15:25" → pega HH:MM com regex para não confundir com o ':' do "Hoje:"
+                m_hoje = re.search(r"(\d{1,2}:\d{2})", data_str)
+                if m_hoje:
+                    hh, mm = map(int, m_hoje.group(1).split(":"))
+                    dt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                    return {"data": dt.strftime("%d/%m/%Y"), "hora": dt.strftime("%H:%M")}
+            except Exception:
+                pass
 
-            dt = now.replace(hour=hora_obj.hour, minute=hora_obj.minute, second=0, microsecond=0)
+        if low.startswith("amanh"):
+            try:
+                m_ama = re.search(r"(\d{1,2}:\d{2})", data_str)
+                if m_ama:
+                    hh, mm = map(int, m_ama.group(1).split(":"))
+                    dt = (now + timedelta(days=1)).replace(
+                        hour=hh, minute=mm, second=0, microsecond=0
+                    )
+                    return {"data": dt.strftime("%d/%m/%Y"), "hora": dt.strftime("%H:%M")}
+            except Exception:
+                pass
+
+
+        # =====================================================
+        # 🇧🇷 MAX PT-BR CURTO: "sáb., 14:55"
+        # =====================================================
+        m = re.match(
+            r"^(seg|ter|qua|qui|sex|sab|sáb|dom)\.,?\s*(\d{1,2}:\d{2})$",
+            data_str.lower()
+        )
+        if m:
+            dia_semana_str = m.group(1).lower().replace("sab", "sáb")
+            hora_str = m.group(2)
+
+            dias_map = {
+                "seg": 0, "ter": 1, "qua": 2, "qui": 3,
+                "sex": 4, "sáb": 5, "dom": 6
+            }
+
+            alvo = dias_map.get(dia_semana_str)
+            if alvo is not None:
+                ref = max(now, bd_dt) if bd_dt else now
+                ref0 = ref.replace(hour=0, minute=0, second=0, microsecond=0)
+
+                delta = (alvo - ref0.weekday()) % 7
+                h, m_ = map(int, hora_str.split(":"))
+                candidato = (ref0 + timedelta(days=delta)).replace(
+                    hour=h, minute=m_, second=0, microsecond=0
+                )
+
+                if candidato < now:
+                    candidato += timedelta(days=7)
+
+                return {
+                    "data": candidato.strftime("%d/%m/%Y"),
+                    "hora": candidato.strftime("%H:%M")
+                }
+
+        # =====================================================
+        # 🇧🇷 PORTUGUESE NUMERIC FORMAT: "sábado, 1/08 17:00 BRT"
+        # =====================================================
+        m = re.search(
+            r"(\d{1,2})/(\d{2})\s+(\d{1,2}:\d{2})",
+            data_str.lower()
+        )
+        if m:
+            dia = int(m.group(1))
+            mes = int(m.group(2))
+            hh, mm = map(int, m.group(3).split(":"))
+
+            dt = datetime(now.year, mes, dia, hh, mm)
+            if dt < now - timedelta(days=15):
+                dt = dt.replace(year=now.year + 1)
+
             return {
                 "data": dt.strftime("%d/%m/%Y"),
                 "hora": dt.strftime("%H:%M")
             }
 
-        # Tomorrow
-        elif data_str.startswith("Tomorrow"):
-            hora = data_str.replace("Tomorrow", "").strip()
+        # =====================================================
+        # 🇧🇷 MAX PT-BR COMPLETO: "18 de jan., 16:55"
+        # =====================================================
+        MESES_PT_LIT = {
+            "jan": 1, "fev": 2, "mar": 3, "abr": 4, "mai": 5, "jun": 6,
+            "jul": 7, "ago": 8, "set": 9, "out": 10, "nov": 11, "dez": 12
+        }
+
+        m = re.search(
+            r"(\d{1,2})\s+de\s+([a-zç]{3})\.?,?\s+(\d{1,2}:\d{2})",
+            data_str.lower()
+        )
+        if m:
+            dia = int(m.group(1))
+            mes = MESES_PT_LIT.get(m.group(2))
+            hh, mm = map(int, m.group(3).split(":"))
+
+            if mes:
+                dt = datetime(now.year, mes, dia, hh, mm)
+                if dt < now - timedelta(days=1):
+                    dt = dt.replace(year=now.year + 1)
+
+                return {
+                    "data": dt.strftime("%d/%m/%Y"),
+                    "hora": dt.strftime("%H:%M")
+                }
+
+        # =====================================================
+        # 🔵 FORMATO INGLÊS / GENÉRICO
+        # =====================================================
+        data_str2 = (
+            data_str.title()
+            .replace("Pm", "PM")
+            .replace("Am", "AM")
+        )
+        data_str2 = re.sub(r"\s+", " ", data_str2)
+        data_str2 = re.sub(r"(\b[AP]M):00\b", r"\1", data_str2)
+
+        if data_str2.startswith("Live At "):
+            hora = data_str2.replace("Live At ", "").strip()
             try:
                 hora_obj = datetime.strptime(hora, "%I:%M %p")
             except ValueError:
                 hora_obj = datetime.strptime(hora, "%I %p")
+            dt = now.replace(hour=hora_obj.hour, minute=hora_obj.minute, second=0, microsecond=0)
+            return {"data": dt.strftime("%d/%m/%Y"), "hora": dt.strftime("%H:%M")}
 
-            dt = now + timedelta(days=1)
-            dt = dt.replace(hour=hora_obj.hour, minute=hora_obj.minute, second=0, microsecond=0)
-            return {
-                "data": dt.strftime("%d/%m/%Y"),
-                "hora": dt.strftime("%H:%M")
-            }
+        if data_str2.startswith("Tomorrow"):
+            hora = data_str2.replace("Tomorrow", "").strip()
+            try:
+                hora_obj = datetime.strptime(hora, "%I:%M %p")
+            except ValueError:
+                hora_obj = datetime.strptime(hora, "%I %p")
+            dt = (now + timedelta(days=1)).replace(
+                hour=hora_obj.hour, minute=hora_obj.minute, second=0, microsecond=0
+            )
+            return {"data": dt.strftime("%d/%m/%Y"), "hora": dt.strftime("%H:%M")}
 
-        # Possíveis formatos
         possible_formats = [
-            "%I:%M %p",
-            "%I %p",
-            "%b %d %I:%M %p",
-            "%b %d %I %p",
-            "%a, %b %d %I:%M %p",
-            "%a, %b %d %I %p",
-            "%a, %b %d %I:%M",
-            "%a, %b %d %I",
-            "%b %d %I:%M",
-            "%b %d %I"
+            "%I:%M %p", "%I %p",
+            "%b %d %I:%M %p", "%b %d %I %p",
+            "%a, %b %d %I:%M %p", "%a, %b %d %I %p",
+            "%a, %b %d %I:%M", "%a, %b %d %I",
+            "%b %d %I:%M", "%b %d %I"
         ]
 
         for fmt in possible_formats:
             try:
-                parsed = datetime.strptime(data_str, fmt)
-                parsed = parsed.replace(year=now.year)
-
-                # Corrige se for data passada (ex: Aug 6 sendo hoje Jul 30)
+                parsed = datetime.strptime(data_str2, fmt).replace(year=now.year)
                 if parsed < now - timedelta(days=1):
                     parsed = parsed.replace(year=now.year + 1)
-
-                return {
-                    "data": parsed.strftime("%d/%m/%Y"),
-                    "hora": parsed.strftime("%H:%M")
-                }
-            except:
+                return {"data": parsed.strftime("%d/%m/%Y"), "hora": parsed.strftime("%H:%M")}
+            except Exception:
                 continue
 
-        logging.warning(f"[DESCARTADO] Data inválida: '{data_str}'")
         return {"data": "", "hora": ""}
 
     except Exception as e:
-        logging.error(f"[ERRO FORMAT_DATETIME] {e}")
+        logging.error(f"[ERRO FORMAT_DATETIME] {e} | original='{data_str}'")
         return {"data": "", "hora": ""}
-def run_eventos_prime(url_camp):
+
+    
+def run_eventos_prime(url_camp, expected_camp=""):
     try:
         label_toolbarprocess.config(text="Atualização de eventos do Amazon Prime")
-        label_toolbar.config(text="Realizando a atualização dos grids com os eventos do Amazon Prime...")
+        text="Realizando a atualização dos grids com os eventos do Amazon Prime..."
         progresso["value"] = 0
         progresso.pack(side=RIGHT, padx=10, pady=5)
 
         if not verificar_chrome_debug("9222"):
             habilita_botoes()
-            label_toolbar.config(text="Chrome (9222) indisponível.")
+            text="Chrome (9222) indisponível."
             return
 
         chrome_options = Options()
@@ -2060,15 +3891,15 @@ def run_eventos_prime(url_camp):
         list_b = list(csv_list)
         var_navegador = "Esquerda"
 
-        label_toolbar.config(text="Abrindo pagina do campeonato...")
+        text="Abrindo pagina do campeonato..."
         progresso["value"] += 5
         driverchrome1.get(url_plataform)
         loginprime(url_camp, us, pas, driverchrome1, 10, "Novos")
 
-        label_toolbar.config(text="Limpando o grid...")
+        text="Limpando o grid..."
         delete_null_items()
 
-        label_toolbar.config(text="Atualizando lista do campeonato Amazon Prime...")
+        text="Atualizando lista do campeonato Amazon Prime..."
         progresso["value"] += 5
 
         wait = WebDriverWait(driverchrome1, 15)
@@ -2078,55 +3909,165 @@ def run_eventos_prime(url_camp):
             EC.presence_of_all_elements_located((By.CSS_SELECTOR, "ul[data-testid='card-container-list']"))
         )
         if not uls:
-            label_toolbar.config(text="Nenhuma lista de cards encontrada.")
+            text="Nenhuma lista de cards encontrada."
             return
 
-        ul = uls[0]
-
-        # Pega os <li> (cada card fica dentro de um li)
-        lis = ul.find_elements(By.CSS_SELECTOR, "li")
-
-        # Se for um carrossel virtualizado, garanta rolagem para materializar elementos
-        if not lis:
-            driverchrome1.execute_script("arguments[0].scrollIntoView({block:'center'});", ul)
-            time.sleep(1)
-            lis = ul.find_elements(By.CSS_SELECTOR, "li")
-
-        for idx, li in enumerate(lis):
+        # Rolagem para forçar carregamento das listas
+        valid_uls = []
+        for u_idx, ul in enumerate(uls):
+            title_text = ""
             try:
-                # ✅ Card estável por data-testid
-                card = li.find_element(By.CSS_SELECTOR, "article[data-testid='card']")
-            except Exception:
-                # Pode haver placeholders; ignore
+                # Procura h2, h3 ou span de título no ancestral
+                parent_shelf = ul.find_element(By.XPATH, "./ancestor::section[1] | ./ancestor::div[contains(@class, 'carousel') or contains(@class, 'shelf')][1]")
+                for tag in ("h2", "h3", "span"):
+                    headers = parent_shelf.find_elements(By.TAG_NAME, tag)
+                    for h in headers:
+                        if h.text.strip():
+                            title_text = h.text.strip()
+                            break
+                    if title_text:
+                        break
+                if not title_text:
+                    title_text = ul.find_element(By.XPATH, "../preceding-sibling::*[1]").text.strip()
+            except:
+                pass
+
+            title_lower = title_text.lower()
+            
+            # Blacklist de palavras-chave para ignorar carrosséis irrelevantes (incluindo replays passados, times/ligas e combo Premiere)
+            blacklist = ["repetições", "repetição", "replays", "replay", "equipes", "equipas", "destaques", "melhores", "momento", "moments", "highlights", "excluir", "ligas", "liga", "teams", "times", "terminadas", "encerrados", "recentemente", "concluídos", "concluidos", "premiere", "combo", "upgrade"]
+            is_blacklisted = any(word in title_lower for word in blacklist)
+            
+            if is_blacklisted:
+                logging.info(f"[Prime] Ignorando lista {u_idx} ('{title_text}') por estar na blacklist.")
                 continue
+                
+            logging.info(f"[Prime] Carrossel {u_idx} ('{title_text}') aceito.")
+            valid_uls.append((ul, title_text))
 
-            # Título confiável via atributo
+        # 🔥 REGRA SOLICITADA: No Prime Video, capturar APENAS a lista principal de cima ("Seus eventos ao vivo e próximos eventos") e ignorar carrosséis inferiores / Premiere
+        if valid_uls:
+            logging.info(f"[Prime] {expected_camp}: restringindo busca apenas à lista principal de cima ('{valid_uls[0][1]}').")
+            valid_uls = valid_uls[:1]
+
+        # Rolagem para forçar carregamento das listas válidas
+        for ul, title in valid_uls:
+            try:
+                driverchrome1.execute_script("arguments[0].scrollIntoView({block:'center'});", ul)
+                time.sleep(0.5)
+            except Exception as scroll_err:
+                logging.warning(f"[Prime] Erro ao rolar lista: {scroll_err}")
+
+        # Pega todos os cards de eventos (normais e super carrosséis) diretamente nas listas válidas
+        cards = []
+        for ul, title in valid_uls:
+            try:
+                ul_cards = ul.find_elements(By.CSS_SELECTOR, "article[data-testid='card'], article[data-testid='super-carousel-card']")
+                cards.extend(ul_cards)
+            except Exception as e:
+                logging.warning(f"[Prime] Erro ao buscar cards na lista '{title}': {e}")
+                
+        logging.info(f"[Prime] Total de cards de eventos encontrados nas listas válidas: {len(cards)}")
+
+        for idx, card in enumerate(cards):
+
+            # Título confiável via atributo ou aria-label/alt para super-carousel-cards
             nome_evento = card.get_attribute("data-card-title") or ""
-
-            # Fallback: se não vier pelo atributo, tenta o <a> interno
+            if not nome_evento.strip():
+                try:
+                    nome_evento = card.find_element(By.CSS_SELECTOR, "a[aria-label]").get_attribute("aria-label")
+                except Exception:
+                    pass
+            if not nome_evento.strip():
+                try:
+                    nome_evento = card.find_element(By.CSS_SELECTOR, "img[alt]").get_attribute("alt")
+                except Exception:
+                    pass
             if not nome_evento.strip():
                 try:
                     nome_evento = card.find_element(By.CSS_SELECTOR, "a._3HZFFn").text.strip()
                 except Exception:
                     nome_evento = ""
 
-            # Horário direto no card (p.GNymT4)
             data_hora = ""
-            try:
-                data_hora = card.find_element(By.CSS_SELECTOR, "p.GNymT4").text.strip()
-            except Exception:
-                pass
 
-            # Link do detalhe
-            url = ""
             try:
-                a_tag = card.find_element(By.CSS_SELECTOR, "a._3HZFFn")
-                url = a_tag.get_attribute("href") or ""
-                # Se vier relativo, prefixa
-                if url.startswith("/"):
-                    url = "https://www.primevideo.com" + url
-            except Exception:
-                pass
+                # Tenta os seletores conhecidos para o texto de data/hora (qKxeGx é o novo do Prime)
+                data_hora_el = None
+                for selector in ("p.qKxeGx", "p.GNymT4"):
+                    try:
+                        data_hora_el = card.find_element(By.CSS_SELECTOR, selector)
+                        break
+                    except:
+                        pass
+                if data_hora_el:
+                    data_hora = data_hora_el.text.strip()
+                    logging.info("[Prime] Data encontrada no card: %r", data_hora)
+            except Exception as e:
+                logging.warning(
+                    "[Prime] Elemento de data não encontrado no card idx=%s: %s",
+                    idx, e
+                )
+
+            # 🔁 Fallback: tenta ler texto visível do card inteiro
+            if not data_hora:
+                try:
+                    data_hora = card.text.strip()
+                    logging.info("[Prime] Fallback data via card.text: %r", data_hora)
+                except Exception as e:
+                    logging.error(
+                        "[Prime] Falha no fallback card.text idx=%s: %s",
+                        idx, e, exc_info=True
+                    )
+            # ================================
+            # DATA/HORA – fluxo correto
+            # ================================
+            raw_text = data_hora  # texto bruto do card
+
+            extracted = extract_prime_datetime(raw_text)
+
+            logging.info(
+                        "[Prime][DEBUG] raw_text=%r | extracted=%r",
+                        raw_text, extracted
+            )
+
+            if not extracted:
+                        logging.warning("[Prime] Data não encontrada no card")
+                        continue  # pula este evento
+
+                    # ⚠️ A PARTIR DAQUI SÓ USE extracted
+            data_hora = extracted
+
+            data_hora_formatada = format_datetime(data_hora)
+
+                    
+            # ================================
+            # URL – captura robusta
+            # ================================
+            url = ""
+
+            try:
+                a_tags = card.find_elements(By.CSS_SELECTOR, "a[href]")
+                if a_tags:
+                    url = a_tags[0].get_attribute("href") or ""
+            except Exception as e:
+                logging.warning("[Prime] Falha ao buscar <a href>: %s", e)
+
+            # Fallback: tenta direto no article
+            if not url:
+                try:
+                    url = card.get_attribute("href") or ""
+                except Exception:
+                    pass
+
+            # Normalização
+            if url.startswith("/"):
+                url = "https://www.primevideo.com" + url
+
+            if not url:
+                logging.warning("[Prime] URL não encontrada para evento: %r", nome_evento)
+            else:
+                logging.info("[Prime] URL capturada: %s", url)
 
             # Se não houver horário no card, entra no detalhe para ler (fallback)
             if not data_hora:
@@ -2148,11 +4089,13 @@ def run_eventos_prime(url_camp):
                         driverchrome1.switch_to.window(driverchrome1.window_handles[0])
 
             # Campeonato (se necessário). O seu XPath antigo é frágil; tenta pegar o alt da imagem do card.
-            # Campeonato (direto no alt da imagem)
+            # Campeonato (direto no alt da imagem ou fallback)
             try:
-                campeonato = card.find_element(By.XPATH, '//*[@id="a-page"]/div[1]/div[5]/main/div/div/div[1]/div/div/ul/li/article/div[5]/h2/div/picture/img').get_attribute('alt').strip()
+                # Tenta pegar do alt da imagem do card
+                campeonato_img = card.find_element(By.CSS_SELECTOR, "img[alt]").get_attribute("alt").strip()
+                campeonato = campeonato_img if (campeonato_img and len(campeonato_img) > 3) else expected_camp
             except Exception:
-                campeonato = ""
+                campeonato = expected_camp or ""
 
             # Normaliza data/hora
             data_str = (data_hora or "").title()
@@ -2169,7 +4112,7 @@ def run_eventos_prime(url_camp):
             if nome_evento.strip() and dt:
                 csv_row = (
                     campeonato,
-                    nome_evento,
+                    prettify_match_name(nome_evento),
                     data_hora_formatada['data'],
                     data_hora_formatada['hora'],
                     var_navegador,
@@ -2213,7 +4156,278 @@ def run_eventos_prime(url_camp):
         fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
         habilita_botoes()
         update_command()
-  
+
+PORTUGUESE_NUMERIC_DT_RE = re.compile(
+    r"\b(?:segunda-feira|terça-feira|quarta-feira|quinta-feira|sexta-feira|sábado|sabado|domingo|segunda|terça|terca|quarta|quinta|sexta|seg|ter|qua|qui|sex|sáb|sab|dom)\b\.?,\s*"
+    r"\d{1,2}/\d{2}\s+\d{1,2}:\d{2}(?:\s*BRT)?",
+    re.IGNORECASE
+)
+
+PORTUGUESE_LITERAL_DT_RE = re.compile(
+    r"\b(?:segunda-feira|terça-feira|quarta-feira|quinta-feira|sexta-feira|sábado|sabado|domingo|segunda|terça|terca|quarta|quinta|sexta|seg|ter|qua|qui|sex|sáb|sab|dom)\b\.?,\s*"
+    r"\d{1,2}\s+de\s+"
+    r"(?:jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)\b\.?\s+"
+    r"\d{1,2}:\d{2}(?:\s*BRT)?",
+    re.IGNORECASE
+)
+
+PRIME_DT_RE = re.compile(
+    r"\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+"
+    r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+"
+    r"\d{1,2}\s+"
+    r"\d{1,2}(?::\d{2})?\s*(?:AM|PM)\b",
+    re.IGNORECASE
+)
+
+def extract_prime_datetime(text: str) -> str:
+    """
+    Extrai data/hora do Prime Video a partir de texto de card (Inglês ou Português).
+    Ex: 'Thu, Jan 29 7:30 PM' ou 'sábado, 1/08 17:00 BRT'
+    """
+    if not text:
+        return ""
+    # 1. Tenta formato numérico português: "sábado, 1/08 17:00 BRT"
+    m = PORTUGUESE_NUMERIC_DT_RE.search(text)
+    if m:
+        return m.group(0).strip()
+    # 2. Tenta formato literal português: "quarta-feira, 22 de jul. 18:50 BRT"
+    m = PORTUGUESE_LITERAL_DT_RE.search(text)
+    if m:
+        return m.group(0).strip()
+    # 3. Tenta formato inglês: "Thu, Jan 29 7:30 PM"
+    m = PRIME_DT_RE.search(text)
+    if m:
+        return m.group(0).strip()
+    return ""
+
+
+def run_eventos_max(url_camp, expected_camp="Campeonato Paulista"):
+    try:
+        label_toolbarprocess.config(text="Atualização de eventos do Max")
+        text="Coletando eventos do Campeonato Paulista (Max)..."
+        progresso["value"] = 0
+        progresso.pack(side=RIGHT, padx=10, pady=5)
+
+        if not verificar_chrome_debug("9222"):
+            habilita_botoes()
+            text="Chrome (9222) indisponível."
+            return
+
+        chrome_options = Options()
+        chrome_options.add_experimental_option(
+            "debuggerAddress", "127.0.0.1:9222"
+        )
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+
+        wait = WebDriverWait(driver, 30)
+
+        progresso["value"] = 5
+        driver.get(url_camp)
+
+        # Aguarda primeiro batch de cards (tolerante — não aborta se não encontrar)
+        try:
+            wait.until(
+                EC.presence_of_all_elements_located(
+                    (By.CSS_SELECTOR, 'a[data-testid$="_tile"]')
+                )
+            )
+        except Exception:
+            logging.warning(f"[Max] Timeout aguardando tiles em '{url_camp}'. Tentando mesmo assim...")
+
+        progresso["value"] = 15
+
+        # 🔁 Rola o rail até estabilizar
+        rolar_cards_proximos_eventos(driver)
+
+        time.sleep(1.5)
+
+        tiles = driver.find_elements(
+            By.CSS_SELECTOR,
+            'a[data-testid$="_tile"]'
+        )
+
+        logging.info(f"[Max] URL: {url_camp} | Campeonato: {expected_camp} | Tiles encontrados: {len(tiles)}")
+        text=f"Cards detectados no DOM: {len(tiles)}"
+        progresso["value"] = 25
+
+        if len(tiles) == 0:
+            # Diagnóstico: tenta listar todos os <a> com data-testid para entender a estrutura
+            all_a = driver.find_elements(By.CSS_SELECTOR, 'a[data-testid]')
+            logging.warning(f"[Max] Nenhum tile encontrado. Total de <a data-testid>: {len(all_a)}")
+            for a in all_a[:10]:
+                try:
+                    logging.warning(f"[Max] <a data-testid='{a.get_attribute('data-testid')}' href='{a.get_attribute('href')}'>")
+                except:
+                    pass
+            label_toolbarprocess.config(text=f"[Max] Nenhum card encontrado para '{expected_camp}'. Verifique os Logs.")
+            progresso.pack_forget()
+            return
+
+        delete_null_items()
+
+        var_navegador = "Esquerda"
+        eventos_encontrados = 0
+        urls_processadas = set()
+
+        # Obtendo data inicial da UI para filtro
+        try:
+            data_inicio_str = entry_data.get()
+            data_inicio_obj = datetime.strptime(data_inicio_str, "%d/%m/%Y")
+        except:
+            data_inicio_obj = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+        for idx, a_tag in enumerate(tiles):
+            info = ler_tile_max_com_retry(a_tag)
+
+            if not info:
+                continue
+
+            url = info["url"]
+            if url.startswith("/"):
+                url = "https://play.hbomax.com" + url
+
+            if url in urls_processadas:
+                continue
+            urls_processadas.add(url)
+
+            data_fmt = format_datetime(info["data_hora"])
+            dt = data_fmt.get("data", "")
+            hr = data_fmt.get("hora", "")
+
+            if not dt:
+                continue
+
+            # remove "Rodada XX" do título e normaliza separador 'v/x' → ' x '
+            titulo = info["titulo"]
+            titulo = re.sub(r"\s+Rodada\s+\d+.*$", "", titulo, flags=re.IGNORECASE).strip()
+            titulo = re.sub(r'\s+[vVxX]\s+', ' x ', titulo)
+            
+            # FILTRO DE DATA
+            try:
+                ev_date_obj = datetime.strptime(dt, "%d/%m/%Y")
+                if ev_date_obj < data_inicio_obj:
+                    continue
+            except:
+                pass
+
+            csv_row = (
+                expected_camp or "Campeonato Paulista",
+                prettify_match_name(titulo),
+                dt,
+                hr,
+                var_navegador,
+                10,
+                "TNT_SPORTS",
+                url
+            )
+
+            tree.insert("", "end", values=csv_row)
+
+            var_navegador = (
+                "Direita" if var_navegador == "Esquerda" else "Esquerda"
+            )
+
+            eventos_encontrados += 1
+
+            if idx % 3 == 0:
+                progresso["value"] = min(95, progresso["value"] + 1)
+
+        if eventos_encontrados == 0:
+             text="Nenhum evento do Paulistão encontrado."
+        else:
+             
+             text=f"Eventos do Paulistão (Max): {eventos_encontrados}"
+            
+
+        progresso["value"] = 100
+        time.sleep(1)
+        progresso.pack_forget()
+        label_toolbarprocess.config(text="")
+
+    except Exception as e:
+        logging.error(f"Erro ocorrido: {e}")
+        habilita_botoes()
+
+def ler_tile_max_com_retry(a_tag, tentativas=6, delay=0.4):
+    """
+    Lê corretamente um tile do Max (Paulistão),
+    lidando com virtualização do rail.
+    """
+    for _ in range(tentativas):
+        try:
+            # URL
+            url = a_tag.get_attribute("href")
+            if not url:
+                raise Exception("href vazio")
+
+            # DATA / HORA  ✅ (seletor CORRETO)
+            badge = a_tag.find_elements(
+                By.CSS_SELECTOR,
+                'span[class*="StyledBadgeText"]'
+            )
+            if not badge:
+                raise Exception("badge não encontrado")
+
+            data_hora = badge[0].text.strip()
+            if not data_hora:
+                raise Exception("data vazia")
+
+            # TÍTULO PRINCIPAL  ✅
+            titulo = a_tag.find_element(
+                By.CSS_SELECTOR,
+                'span[class*="StyledPrimaryTitle"]'
+            ).text.strip()
+
+            if not titulo:
+                raise Exception("titulo vazio")
+
+            # ❌ NÃO adiciona rodada no nome
+            return {
+                "url": url,
+                "data_hora": data_hora,
+                "titulo": titulo
+            }
+
+        except Exception:
+            time.sleep(delay)
+
+    return None
+
+        
+def rolar_cards_proximos_eventos(driver, max_clicks=40, wait_time=0.8):
+    """
+    Força o carregamento TOTAL do rail do Max
+    clicando na seta e garantindo repaint do DOM.
+    """
+    for i in range(max_clicks):
+        try:
+            btn = driver.find_element(
+                By.CSS_SELECTOR,
+                'button[data-position="forward"]'
+            )
+
+            if not btn.is_displayed():
+                break
+
+            # força o botão a ficar visível
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center', inline:'center'});",
+                btn
+            )
+
+            time.sleep(0.2)
+
+            # clique via JS (obrigatório no Max)
+            driver.execute_script("arguments[0].click();", btn)
+
+            # força repaint do rail
+            driver.execute_script("window.dispatchEvent(new Event('resize'));")
+
+            time.sleep(wait_time)
+
+        except Exception:
+            break
 
 def reduzir_minutos(minutos_a_subtrair):
     """
@@ -2248,21 +4462,21 @@ def converter_data_pt(data_str):
      # 3. Formata como string no novo formato
     return data_str2.strftime("%d/%m/%Y")  # Formato brasileiro
 
-def run_eventos_disney(url_camp):
+def run_eventos_disney(url_camp, expected_camp=None):
 
   try:   
         
       
         #  Usa o navegador da esquerda para buscar a lista
         label_toolbarprocess.config(text="Atualização de eventos da Disney")
-        label_toolbar.config(text="Realizando a atualização dos eventos da Disney no grids...")
+        text="Realizando a atualização dos eventos da Disney no grids..."
         progresso["value"] = 0
         #    Exibe progressbar
         progresso.pack(side=RIGHT, padx=10, pady=5)
 
         if not verificar_chrome_debug("9222"):
             habilita_botoes()
-            label_toolbar.config(text="Chrome (9222) indisponível.")
+            text="Chrome (9222) indisponível."
             return
 
         chrome_options = Options()
@@ -2286,17 +4500,24 @@ def run_eventos_disney(url_camp):
 
         var_navegador = "Esquerda"
 
-        # Abre na url do campeonato em questão selecionado
-        label_toolbar.config(text="Abrindo pagina do campeonato da Disney...")
+        text="Abrindo pagina do campeonato da Disney..."
         progresso["value"] = progresso["value"] + 5
         driverchrome1.get(url_plataform)
-        loginprime(url_camp,us,pas,driverchrome1,10,"Novos")
+        logindisney(url_camp,us,pas,driverchrome1,10,"Novos")
 
-        label_toolbar.config(text="Limpando o grid...")
+        text="Limpando o grid..."
         delete_null_items()
        
-        label_toolbar.config(text="Atualizando lista...")
+        text="Atualizando lista..."
         progresso["value"] = progresso["value"] + 5
+
+        # Obtendo data inicial da UI para filtro
+        try:
+            data_inicio_str = entry_data.get()
+            data_inicio_obj = datetime.strptime(data_inicio_str, "%d/%m/%Y")
+        except:
+            data_inicio_obj = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
          # Procura elmento principal dos proximos eventos
         c1 = driverchrome1.find_elements(By.XPATH,'//*[@class="_192jb2w9 xgfbc11x2 ordv7e0"]')
         terminar_externo = False
@@ -2380,23 +4601,29 @@ def run_eventos_disney(url_camp):
                        event = all_text[1]
                        if len(list_b) > 0:
 
-                         if 'Brasileiro' in all_text[2] and 'Transmitido' not in dt_time[0] :
+                         if len(all_text) > 2 and 'Transmitido' not in dt_time[0]:
                            event = all_text[1]
-                           champ =  all_text[2].replace("Campeonato", "").strip()                       
-                           nor = h[n].find_elements(By.XPATH,'//*[@class="_2c2l371 _11x60sa1 xgfbc1ge xgfbc1l2 xgfbc1pq xgfbc1ue xgfbc11yw xgfbc17w xgfbc18q"]')
-                           url = nor[n].get_attribute("href")
+                           champ = all_text[2].replace("Campeonato", "").strip() if len(all_text) > 2 else (expected_camp or "Disney")
+                           
+                           # Tenta pegar o link da tag pai ou de links internos
+                           links = h[n].find_elements(By.TAG_NAME, "a")
+                           url = links[0].get_attribute("href") if links else ""
                            
                            plataforma = "Disney"
+                           
+                           # FILTRO DE DATA
+                           try:
+                               ev_date_obj = datetime.strptime(data_str, "%d/%m/%Y")
+                               if ev_date_obj < data_inicio_obj:
+                                   continue
+                           except:
+                               pass
 
-                           csv_list = (champ,event,data_str,hour,var_navegador,0,plataforma,url)
+                           csv_list = (champ, prettify_match_name(event), data_str, hour, var_navegador, 0, plataforma, url)
                            tree.insert("", "end", values=csv_list)
                          
-                           if var_navegador == "Esquerda":
-                            var_navegador = "Direita"
-                           elif var_navegador == "Direita":
-                            var_navegador = "Esquerda"
-                           
-                           list_b.append(csv_list)        
+                           var_navegador = "Direita" if var_navegador == "Esquerda" else "Esquerda"
+                           list_b.append(csv_list)
 
                            if len(elemento_hover) > 0:
                                  driverchrome1.execute_script("arguments[0].click();", elemento_hover[0])  
@@ -2484,128 +4711,191 @@ def habilita_botoes():
     button_chrome2.config(state=NORMAL)
     button_delete.config(state=NORMAL)
   
-def run_busca_eventos():
-
- try:
- 
-  if  button_update["text"] == "Running" or button_update["text"] == "Stoped":
-    update_command()
-
-
-  if is_selected_plat("Dazn"):
-
-        if is_selected_camp("Mundial de Clubes FIFA"):
-          url_camp = 'https://www.dazn.com/pt-BR/competition/Competition:dc4k1xh2984zbypbnunk7ncic'
-          run_eventos_dazn(url_camp)
-          remover_duplicatas(tree)
-   
-  if is_selected_plat("Amazon Prime"):
-
-        if is_selected_camp("Brasileirão serie A"):
-          url_camp = 'https://www.primevideo.com/tournament/amzn1.dv.icid.5a28c628-0310-42c0-8966-2f1f748488d3/ref=atv_hm_spo_c_NPzfck_2_1?jic=8%7CEgNhbGw%3D'
-          run_eventos_prime(url_camp)
-          remover_duplicatas(tree)
-       
-        if is_selected_camp("Copa do Brasil"):
-          url_camp = 'https://www.primevideo.com/tournament/amzn1.dv.icid.6e097abf-f4c9-4638-ba1e-7ff95367e1c8/ref=atv_hm_spo_c_NPzfck_2_2?jic=8%7CEgNhbGw%3D'
-          run_eventos_prime(url_camp) 
-          remover_duplicatas(tree)
-
+def run_busca_eventos(ignorar_trava=False):
+    global thread_em_execucao
+    if thread_em_execucao and not ignorar_trava:
+        logging.info("[INFO] Já existe uma busca em andamento. Abortando nova tentativa.")
+        return
     
-#   if is_selected_plat("Disney"):
+    conseguiu_trava = False
+    if not ignorar_trava:
+        thread_em_execucao = True
+        conseguiu_trava = True
 
-#         if is_selected_camp("Brasileirão serie B"):
-#           url_camp = 'https://www.disneyplus.com/pt-br/browse/entity-50b0affc-3aa0-4ac1-bda8-d37b1745ea95'
-#           run_eventos_disney(url_camp) 
-#           remover_duplicatas(tree)
+    try:
+        logging.info("Iniciando run_busca_eventos...")
 
-
-  if is_selected_plat("Caze"):
-   
-   csv_list = ()
-   list_b = list(csv_list)
-   canal_url = 'https://www.youtube.com/@CazeTV/streams'  # Substitua com o URL do canal desejado
-    #  Usa o navegador da esquerda para buscar a lista
-   label_toolbarprocess.config(text="Atualização de eventos do Caze TV")
-   label_toolbar.config(text="Realizando a atualização dos grids com os eventos do Caze TV...")
-    #    Exibe progressbar
-   desabilita_botoes()
-   progresso.pack_forget()
-   eventos = obter_eventos_futuros(canal_url) 
-   progresso.pack(side=RIGHT, padx=10, pady=5)
-   progresso["value"] = 0  
-   var_navegador = "Esquerda"
-
-   if eventos:
-    for evento in eventos:
-        champ,titulo, url, data, horario = evento
-        event = titulo 
-                                            
-        plataforma = "Caze"
-                            
-               
-        progresso["value"] = progresso["value"] + 5
-        time.sleep(1)
-        if is_selected_camp("Brasileirão serie A"):
-
-            if "BRASILEIRÃO" in champ:
-                champ =  "Brasileirão serie A" 
-                csv_list = (champ,event,data,horario,var_navegador,0,plataforma,url)
-
-        if is_selected_camp("Mundial de Clubes FIFA"): 
-
-            if "BRASILEIRÃO" not in champ.upper():
-                champ =  "Mundial de Clubes FiFA" 
-                csv_list = (champ,event,data,horario,var_navegador,0,plataforma,url)        
-
-        tree.insert("", "end", values=csv_list)
-
-        if var_navegador == "Esquerda":
-                var_navegador = "Direita"
-        elif var_navegador == "Direita":
-                var_navegador = "Esquerda"
+        # MODO SOMENTE RELATORIO: Abre o Chrome 1 automaticamente antes da busca
+        if checkbox_busca.get() == 1:
+            logging.info("Modo 'Somente Relatório' detectado. Abrindo Chrome (9222)...")
+            update_chrome1()
+            time.sleep(5) # Aguarda inicialização robusta
         
-        list_b.append(csv_list)     
-                                 
-    remover_duplicatas(tree)
-   
-  ajustartodootree()
+        if button_update["text"] == "Running" or button_update["text"] == "Stoped":
+            update_command()
 
-        #  Volta a running a aplicação
-  update_command()
 
-  habilita_botoes()
-  progresso["value"] = 100
-  time.sleep(2)
-  progresso.pack_forget()
- 
- except UnboundLocalError as e:
-       logging.error(f"Erro ocorrido: {e}")  # Registra o erro no log
-       exc_type, exc_obj, exc_tb = sys.exc_info()
-       fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-       habilita_botoes()
-       update_command()  
-       pass
+        if is_selected_plat("Dazn"):
+            if is_selected_camp("Mundial de Clubes FIFA"):
+                url_camp = 'https://www.dazn.com/pt-BR/competition/Competition:dc4k1xh2984zbypbnunk7ncic'
+                run_eventos_dazn(url_camp, expected_camp="Mundial de Clubes FIFA")
+                padronizar_nomes_grid(tree)
+                remover_duplicatas(tree)
 
- except Exception as e: 
-  logging.error(f"Erro ocorrido: {e}") 
-  exc_type, exc_obj, exc_tb = sys.exc_info()
-  fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-  habilita_botoes()
-  pass
+        if is_selected_plat("Amazon Prime"):
+            if is_selected_camp("Brasileirão serie A"):
+                url_camp = 'https://www.primevideo.com/tournament/amzn1.dv.icid.5a28c628-0310-42c0-8966-2f1f748488d3/ref=atv_hm_spo_c_NPzfck_2_1?jic=8%7CEgNhbGw%3D'
+                run_eventos_prime(url_camp, expected_camp="Brasileirão serie A")
+                padronizar_nomes_grid(tree)
+                remover_duplicatas(tree)
+            if is_selected_camp("Copa do Brasil"):
+                url_camp = 'https://www.primevideo.com/tournament/amzn1.dv.icid.6e097abf-f4c9-4638-ba1e-7ff95367e1c8/ref=atv_hm_spo_c_NPzfck_2_2?jic=8%7CEgNhbGw%3D'
+                run_eventos_prime(url_camp, expected_camp="Copa do Brasil") 
+                padronizar_nomes_grid(tree)
+                remover_duplicatas(tree)
+
+        if is_selected_plat("Max"):
+            if is_selected_camp("Campeonato Paulista"):
+                url_camp = 'https://play.hbomax.com/sport/event/paulistao'
+                run_eventos_max(url_camp, expected_camp="Campeonato Paulista")
+                padronizar_nomes_grid(tree)
+                remover_duplicatas(tree)
+
+        if is_selected_plat("Disney"):
+            if is_selected_camp("CONMEBOL Libertadores"):
+                url_camp = 'https://www.disneyplus.com/pt-br/browse/entity-1229387e-c683-4ef3-9f32-68824a7be427'
+                run_eventos_disney(url_camp, expected_camp="CONMEBOL Libertadores")
+                padronizar_nomes_grid(tree)
+                remover_duplicatas(tree)
+            if is_selected_camp("CONMEBOL Sudamericana"):
+                url_camp = 'https://www.disneyplus.com/pt-br/browse/entity-7bf8f49c-cc47-4d42-9a85-587631faee03'
+                run_eventos_disney(url_camp, expected_camp="CONMEBOL Sudamericana")
+                padronizar_nomes_grid(tree)
+                remover_duplicatas(tree)
+
+
+        if is_selected_plat("Cazé TV"):
+            canal_url = 'https://www.youtube.com/@CazeTV/streams'
+            label_toolbarprocess.config(text="Atualização de eventos do Caze TV")
+            desabilita_botoes()
+            progresso.pack_forget()
+            eventos = obter_eventos_futuros(canal_url) 
+            progresso.pack(side=RIGHT, padx=10, pady=5)
+            progresso["value"] = 0  
+            var_navegador = "Esquerda"
+
+            if eventos:
+                for evento in eventos:
+                    champ, titulo, url, data, horario = evento
+                    event = titulo
+                    plataforma = "Cazé TV"
+                    progresso["value"] += 5
+                    
+                    csv_list = None
+                    # Brasileirão na Cazé TV
+                    if is_selected_camp("Brasileirão serie A") and "BRASILEIRAO" in champ.upper():
+                        csv_list = ("Brasileirão serie A", event, data, horario, var_navegador, 15, plataforma, url)
+                    # Paulista na Cazé TV
+                    elif is_selected_camp("Campeonato Paulista") and "PAULISTA" in champ.upper():
+                        csv_list = ("Campeonato Paulista", event, data, horario, var_navegador, 15, plataforma, url)
+                    # Copa do Mundo (se houver na Cazé TV)
+                    elif is_selected_camp("Copa do Mundo") and "COPA DO MUNDO" in champ.upper():
+                        csv_list = ("Copa do Mundo FIFA 2026", event, data, horario, var_navegador, 15, plataforma, url)
+                    # Libertadores na Cazé TV
+                    elif is_selected_camp("CONMEBOL Libertadores") and "LIBERTADORES" in champ.upper():
+                        csv_list = ("CONMEBOL Libertadores", event, data, horario, var_navegador, 15, plataforma, url)
+                    # Sudamericana na Cazé TV
+                    elif is_selected_camp("CONMEBOL Sudamericana") and "SUDAMERICANA" in champ.upper():
+                        csv_list = ("CONMEBOL Sudamericana", event, data, horario, var_navegador, 15, plataforma, url)
+
+                    if csv_list:
+                        # Aplica nome canônico bonito antes de inserir no grid
+                        csv_list = (csv_list[0], prettify_match_name(csv_list[1])) + csv_list[2:]
+                        tree.insert("", "end", values=csv_list)
+                        var_navegador = "Direita" if var_navegador == "Esquerda" else "Esquerda"
+
+        # 🔥 NOVO PIPELINE CBF (PDF) - Rodando por último e pulando o que Selenium já encontrou
+        if is_selected_plat("CBF"):
+            logging.info("Acionando pipeline CBF...")
+            run_eventos_cbf()
+
+        # ── Campeonatos Extras (cadastrados na aba ⚽ Campeonatos) ─────────────
+        try:
+            _scraper_map = {
+                "Amazon Prime": run_eventos_prime,
+                "Disney":       run_eventos_disney,
+                "Max":          run_eventos_max,
+                "Dazn":         run_eventos_dazn,
+                "Cazé TV":      None,  # Cazé TV usa pipeline próprio abaixo
+            }
+            for cfg in carregar_campeonatos_config():
+                if not cfg.get("ativo", True):
+                    continue
+                nome_camp = cfg.get("campeonato", "")
+                plat      = cfg.get("plataforma", "")
+                url_camp  = cfg.get("url", "")
+                if not nome_camp or not url_camp or not plat:
+                    continue
+
+                logging.info(f"[CampExtras] Buscando '{nome_camp}' em '{plat}'...")
+                label_toolbarprocess.config(text=f"Buscando {nome_camp} ({plat})...")
+
+                if plat == "Cazé TV":
+                    # Cazé TV: busca via obter_eventos_futuros e filtra pelo nome
+                    try:
+                        eventos_caze = obter_eventos_futuros(url_camp)
+                        var_nav_ext = "Esquerda"
+                        for champ_c, titulo_c, url_c, data_c, horario_c in (eventos_caze or []):
+                            row_ext = (nome_camp, prettify_match_name(titulo_c), data_c, horario_c, var_nav_ext, 15, "Cazé TV", url_c)
+                            tree.insert("", "end", values=row_ext)
+                            var_nav_ext = "Direita" if var_nav_ext == "Esquerda" else "Esquerda"
+                    except Exception as e_caze:
+                        logging.error(f"[CampExtras] Erro Cazé TV '{nome_camp}': {e_caze}")
+                else:
+                    fn = _scraper_map.get(plat)
+                    if fn:
+                        try:
+                            fn(url_camp, expected_camp=nome_camp)
+                        except Exception as e_ext:
+                            logging.error(f"[CampExtras] Erro '{nome_camp}' ({plat}): {e_ext}")
+
+                padronizar_nomes_grid(tree)
+                remover_duplicatas(tree)
+        except Exception as e_dyn:
+            logging.error(f"[CampExtras] Erro geral no pipeline dinâmico: {e_dyn}")
+
+        padronizar_nomes_grid(tree)
+        remover_duplicatas(tree)
+        ajustartodootree()
+    
+    except Exception as e:
+        logging.error(f"Erro em run_busca_eventos: {e}")
+    finally:
+        if conseguiu_trava:
+            thread_em_execucao = False
+        habilita_botoes()
+        progresso.pack_forget()
+        label_toolbarprocess.config(text="")
+        
+        # MODO SOMENTE RELATORIO: Fecha o Chrome 1 ao terminar
+        if checkbox_busca.get() == 1:
+            logging.info("Finalizando busca em modo Relatório. Fechando Chrome (9222)...")
+            fechar_chrome_por_porta("9222")
+        
+        
 
 def ajustartodootree():
-            label_toolbar.config(text="Ajustando colunas do grid...")
+            text="Ajustando colunas do grid..."
             progresso["value"] = progresso["value"] + 10
             autoajustar_colunas(tree,ignorar=['Url'])          
-            label_toolbar.config(text="Ordenando por horário em ordem crescente") 
+            text="Ordenando por horário em ordem crescente"
             progresso["value"] = progresso["value"] + 10
             sort_by_time(tree, 2, 3)
-            label_toolbar.config(text="filtrando por data em ordem crescente")
+            text="filtrando por data em ordem crescente"
             progresso["value"] = progresso["value"] + 10
             sort_by_date(tree, "Data")
-            label_toolbar.config(text="Removendo eventos duplicados")            
-            label_toolbar.config(text="Finalizado processo de busca de todos os eventos!")
+            text="Removendo eventos duplicados"      
+            text="Finalizado processo de busca de todos os eventos!"
             progresso.pack_forget()
             label_toolbarprocess.config(text="")
             progresso["value"] = 100
@@ -2638,20 +4928,22 @@ def sort_by_time(tree, date_col, time_col):
     # Obtendo todos os itens da Treeview
     items = list(tree.get_children())
     
-    # Função personalizada de comparação
-    def get_sort_key(item_id):
-        item = tree.item(item_id)
-        data = item['values'][date_col]
-        hora = item['values'][time_col]
-        # Retorna tupla (data, hora), para ordenar primeiro por data e depois por hora
-        return (data, hora)
+    qtd = len(items)
+    if qtd > 1:    
+        # Função personalizada de comparação
+        def get_sort_key(item_id):
+            item = tree.item(item_id)
+            data = item['values'][date_col]
+            hora = item['values'][time_col]
+            # Retorna tupla (data, hora), para ordenar primeiro por data e depois por hora
+            return (data, hora)
 
-    # Ordenando os itens usando a chave de comparação
-    sorted_items = sorted(items, key=get_sort_key)
+        # Ordenando os itens usando a chave de comparação
+        sorted_items = sorted(items, key=get_sort_key)
 
-    # Recolocando os itens ordenados na Treeview
-    for index, item_id in enumerate(sorted_items):
-        tree.move(item_id, '', index)
+        # Recolocando os itens ordenados na Treeview
+        for index, item_id in enumerate(sorted_items):
+            tree.move(item_id, '', index)
 
 def mostrar_selecao(event):
     """Função para imprimir o item selecionado"""
@@ -2742,10 +5034,22 @@ def exportar_para_csv(treeview, nome_arquivo="data.csv"):
   exc_type, exc_obj, exc_tb = sys.exc_info()
   fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
   habilita_botoes()
-  label_toolbar.config(text =f"Streaming Scheduler error: {e}")
+  text =f"Streaming Scheduler error: {e}"
   pass
+ 
+def safe_tree_delete(tree, iid):
+    try:
+        if tree.exists(iid):
+            tree.delete(iid)
+    except Exception:
+        pass
 
 def limpar_treeview():
+    global _eventos_iniciados
+    try:
+        _eventos_iniciados.clear()
+    except Exception:
+        pass
     try:
         for item in list(tree.get_children()):
             if tree.exists(item):
@@ -2829,13 +5133,16 @@ def remover_duplicatas(tree):
         
         # Primeira passada: identificar duplicatas
         for item in tree.get_children():
-            valores = tree.item(item, 'values')
+            values = tree.item(item, 'values')
             
             try:
-                # Cria chave única baseada nas colunas relevantes
-                chave = tuple(str(valores[i]) for i in colunas_chave if i < len(valores))
+                # Chave agressiva: Jogo normalizado (FUZZY) e Data
+                # Usa deep_normalize_match para detectar 'Vasco' vs 'Vasco da Gama'
+                jogo_fuzzy = deep_normalize_match(values[1])
+                data_val = str(values[2])
+                chave = (jogo_fuzzy, data_val)
             except (IndexError, TypeError, AttributeError) as e:
-                logging.warning(f"Item {item} com valores inválidos: {valores} - {str(e)}")
+                logging.warning(f"Item {item} com valores inválidos: {values} - {str(e)}")
                 continue
             
             if chave in itens_unicos:
@@ -2942,7 +5249,7 @@ def load_csv_new():
                 exc_type, exc_obj, exc_tb = sys.exc_info()
                 fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
                 habilita_botoes()
-                label_toolbar.config(text=f"Streaming Scheduler error: {e}")
+                text=f"Streaming Scheduler error: {e}"
             pass
     
 def load_csv_inicio():
@@ -2985,7 +5292,7 @@ def load_csv_inicio():
                 exc_type, exc_obj, exc_tb = sys.exc_info()
                 fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
                 habilita_botoes()        
-                label_toolbar.config(text =f"Streaming Scheduler error:{e}")
+                text =f"Streaming Scheduler error:{e}"
                 pass
 
 def load_csv():
@@ -3018,7 +5325,7 @@ def event_closedwindow():
 
      if resp:
          salvar()
-         label_toolbar.config(text ="Configurações salvas com sucesso")
+         text ="Configurações salvas com sucesso"
          root.destroy()
      else:
          root.destroy()
@@ -3074,6 +5381,8 @@ def update_chrome1():
             "--remote-debugging-address=127.0.0.1",
             "--remote-debugging-port=9222",
             f"--user-data-dir={dir_final}",
+            "--profile-directory=Default",
+            "--disable-features=SkipProfilePicker",
             "--no-first-run", "--no-default-browser-check",
         ])
     except Exception as e:
@@ -3094,6 +5403,8 @@ def update_chrome2():
             "--remote-debugging-address=127.0.0.1",
             "--remote-debugging-port=9224",
             f"--user-data-dir={dir_final}",
+            "--profile-directory=Default",
+            "--disable-features=SkipProfilePicker",
             "--no-first-run", "--no-default-browser-check",
         ])
     except Exception as e:
@@ -3126,35 +5437,32 @@ def tentar_reproduzir_evento(driver, url):
         habilita_botoes()
         return False
 
-
 def update_command():
- 
- try:
-   
-   if  button_update["text"] == "Running":
-               button_update["text"] = "Stoped"
-               button_update["fg"] = "red"
-            #    threadingTimer.cancel()    
-               button_update["text"] = "Start"
-               button_update["fg"] = "green"
-   
-   
-   elif  button_update["text"] == "Start":
-                button_update["text"] = "Running"
-                button_update["fg"] = "red"
-                iniciar_thread(run_app)
+    global threadingTimer
 
-   elif  button_update["text"] == "Stoped":
-                button_update["text"] = "Start"
-                button_update["fg"] = "green"
+    try:
+        if button_update["text"] == "Running":
+            button_update["text"] = "Start"
+            button_update["fg"] = "green"
 
+            if threadingTimer is not None:
+                threadingTimer.cancel()
+                threadingTimer = None
+            return
 
- except Exception as e: 
-         logging.error(f"Erro ocorrido: {e}") 
-         exc_type, exc_obj, exc_tb = sys.exc_info()
-         fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-         habilita_botoes()
-         pass
+        if button_update["text"] == "Start":
+            root.after(1000, loop_verificacao)
+            button_update["text"] = "Running"
+            button_update["fg"] = "red"
+            return
+
+    except Exception as e:
+        logging.exception(f"Erro em update_command: {e}")
+
+def loop_verificacao():
+    if button_update["text"] == "Running":
+        iniciar_thread(run_app)
+        root.after(30000, loop_verificacao)  # 30s
  
 def iniciar_thread(metodo):
     """Inicia a thread e captura erros com log e envio para Telegram"""
@@ -3230,22 +5538,18 @@ def verificar_e_clicar(botao):
                 if tempo_inicial is None:
                     tempo_inicial = time.time()
                     logging.info("[INFO] Botão 'Start' detectado. Iniciando contagem...")
-                    label_toolbar.config(text="[INFO] Botão 'Start' detectado. Iniciando contagem...")
                     habilita_botoes()
                 elif time.time() - tempo_inicial >= 600:
                     logging.info("[INFO] Botão ficou 'Start' por mais de 10 minutos. Clicando...")
-                    label_toolbar.config(text="[INFO] Botão ficou 'Start' por mais de 10 minutos. Clicando...")
                     update_command()
                     tempo_inicial = None
             else:
                 if tempo_inicial is not None:
                     logging.info("[INFO] Texto mudou. Resetando contagem.")
-                    label_toolbar.config(text="[INFO] Texto mudou. Resetando contagem.")
                 tempo_inicial = None
 
         except Exception as e:
             logging.error(f"[WARNING] Erro ao acessar o botão: {e}")
-            label_toolbar.config(text=f"[WARNING] Erro ao acessar o botão: {e}")
             habilita_botoes()
             tempo_inicial = None
 
@@ -3253,66 +5557,27 @@ def verificar_e_clicar(botao):
 
 
 def iniciar_monitoramento(entry_horario, funcao):
-
- try:
-    thread = threading.Thread(target=monitorar_horario, args=(entry_horario, funcao))
-    thread.daemon = True
-    thread.start()
-
-    logging.info(f"Aguardando proximo update de eventos: {entry_horario.get()}")
-    label_toolbar.config(text=f"Aguardando proximo update de eventos: {entry_horario.get()}")
-
- except Exception as e:
-            logging.info(f"[ERRO] {e}")
-            habilita_botoes()
-            time.sleep(5)
+    pass
 
 def monitorar_horario(entry_horario, funcao):
-    while True:
-        try:
-            horario_entrada = entry_horario.get().strip()
-
-            if ":" not in horario_entrada:
-                logging.info("[ERRO] Horário inválido. Use MM:SS")
-                label_toolbar.config(text="[ERRO] Horário inválido. Use MM:SS")
-                time.sleep(5)
-                continue
-
-            horas, minutos = map(int, horario_entrada.split(":"))
-
-            agora = datetime.now()
-            if agora.hour == horas and agora.minute == minutos:
-                if not thread_em_execucao:
-                    logging.info(f"[INFO] Executando no horário {horario_entrada}")
-                    label_toolbar.config(text=f"[INFO] Executando no horário {horario_entrada}")
-                    threading.Thread(target=funcao).start()
-                else:
-                    logging.info("[INFO] Já está executando, aguardando próxima janela.")
-                    label_toolbar.config(text="[INFO] Já está executando, aguardando próxima janela.")
-                time.sleep(60)  # Evita executar mais de uma vez no mesmo minuto
-            else:
-                time.sleep(1)
-        except Exception as e:
-            logging.info(f"[ERRO] {e}")
-            habilita_botoes()
-            time.sleep(5)
+    pass
             
 def executar_funcao():
     global thread_em_execucao
     if thread_em_execucao:
         logging.info("[INFO] Já está em execução. Ignorado.")
-        label_toolbar.config(text="[INFO] Já está em execução. Ignorado.")
+        text="[INFO] Já está em execução. Ignorado."
         return
 
     thread_em_execucao = True
     try:
         logging.info(f"[EXECUTANDO] Função executada em {datetime.now().strftime('%H:%M:%S')}")
-        label_toolbar.config(text=f"[EXECUTANDO] Função executada em {datetime.now().strftime('%H:%M:%S')}")
+        text=f"[EXECUTANDO] Função executada em {datetime.now().strftime('%H:%M:%S')}"
         time.sleep(10)  # Simula uma tarefa demorada
     finally:
         thread_em_execucao = False
         logging.info("[INFO] Função finalizada.")
-        label_toolbar.config(text="[INFO] Função finalizada.")
+        text="[INFO] Função finalizada."
 
 
 def refresh_youtube(driver):
@@ -3326,10 +5591,55 @@ def refresh_youtube(driver):
         if "Ah, bolas" in driver.title or "Aw, Snap" in driver.title:
           
             driver.refresh()  # ou driver.get(url) novamente
-    except:
-        logging.info("Elemento body não encontrado, possível erro de carregamento")
+    except Exception as e:
+        logging.info(f"Elemento body não encontrado, possível erro de carregamento: {e}")
         driver.refresh()
 
+def _kill_all_chrome_instances(grace_seconds: float = 2.5):
+    """
+    Encerra TODAS as instâncias do Chrome e chromedriver.
+    Usado somente no modo 'Somente relatório'.
+    """
+    targets = {"chrome.exe", "chromedriver.exe"}
+    procs = []
+
+    for p in psutil.process_iter(["pid", "name"]):
+        try:
+            if p.info["name"] and p.info["name"].lower() in targets:
+                procs.append(p)
+        except Exception:
+            pass
+
+    for p in procs:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+
+    _, alive = psutil.wait_procs(procs, timeout=grace_seconds)
+
+    for p in alive:
+        try:
+            p.kill()
+        except Exception:
+            pass
+
+
+def preparar_chrome_esquerda_para_relatorio():
+    """
+    Fluxo exclusivo para 'Somente relatório':
+    - Fecha TODOS os Chromes
+    - Abre apenas o Chrome ESQUERDA (9222)
+    """
+    logging.info("[RELATORIO] Preparando Chrome ESQUERDA (9222)")
+    _kill_all_chrome_instances()
+    time.sleep(1)
+
+    update_chrome1()   # <<< já existe no seu projeto (9222)
+    time.sleep(2)
+
+    if not verificar_chrome_debug("9222"):
+        raise RuntimeError("Chrome ESQUERDA (9222) não respondeu")
     
 
 def run_app():
@@ -3343,14 +5653,45 @@ def run_app():
  global threadingTimer
  global driverchrome1
  global driverchrome2
+ global thread_em_execucao 
+ global monitoramento_ativo 
 
+ # 1. Verificação segura do Agendamento Diário (sem travas ou conflitos)
+ try:
+     agora = datetime.now()
+     hora_cfg = entry_email2.get().strip()
+     if checkbox_grid.get() and checkbox_ema.get() and ":" in hora_cfg:
+         h, m = map(int, hora_cfg.split(":"))
+         alvo = agora.replace(hour=h, minute=m, second=0, microsecond=0)
+         
+         if agora >= alvo and _ultima_janela_envio.date() != agora.date():
+             logging.info(f"[AGENDADO] Horário atingido ({hora_cfg}). Executando tarefa_diaria em segundo plano...")
+             threading.Thread(target=tarefa_diaria).start()
+             
+             # Rearma o timer e encerra este tick
+             if button_update["text"] == "Running":
+                 num_refresh = int(refresh_entry.get())
+                 threadingTimer = Timer(num_refresh, run_app)
+                 threadingTimer.start()
+             return
+ except Exception as e:
+     logging.error(f"[AGENDADO] Erro ao checar agendamento no início do run_app: {e}")
+
+ conseguiu_trava = False
  try:                           
+  
+  if thread_em_execucao:
+        logging.info("run_app ignorado: execução anterior ainda ativa")
+        return
+
+  thread_em_execucao = True
+  conseguiu_trava = True
+
   status = button_update["text"]
   
-#    Checar versão nova
-  checar_update()
+#    Checar versão nova - removido do loop recorrente para evitar vazamento de sockets e threads
   desabilita_botoes()
-  iniciar_monitoramento(entry_email2, tarefa_diaria)
+  monitoramento_ativo = True
   
   if driverchrome1 is not None:
     refresh_youtube(driverchrome1)
@@ -3359,7 +5700,8 @@ def run_app():
 
 
   if  status == "Running":
-
+      
+    
    cwd = os.path.realpath('.')
    file = "data.csv"
    dir_final = os.path.join(cwd,file)
@@ -3395,13 +5737,13 @@ def run_app():
        horatemp = datetime.combine(datatemp,datetime.strptime(horastr, '%H:%M').time())
        timeantes = int(tree.item(parent)["values"][5])
        horasubt = horatemp - timedelta(hours=0, minutes=timeantes)
-       horasubt2 = str(horasubt.hour)+":"+str(horasubt.minute)
+       horasubt2 = horasubt.strftime("%H:%M")
        horatemp_time_format = datetime.strptime(horasubt2,'%H:%M').time()
 
-       hora_minuto = str(datetime.now().hour)+":"+str(datetime.now().minute)
+       hora_minuto = datetime.now().strftime("%H:%M")
        horaatual_time_format = datetime.strptime(hora_minuto,'%H:%M').time()
 
-       if horaatual_time_format == horatemp_time_format:
+       if horaatual_time_format >= horatemp_time_format:
        
         if plataform == "Dazn":
          user =  get_config_value("usuario_dazn")
@@ -3412,18 +5754,20 @@ def run_app():
         elif plataform == "Disney":
          user =  get_config_value("usuario_disney")
          pas = get_config_value("senha_disney") 
+        elif plataform == "Max":
+         user =  get_config_value("usuario_max")
+         pas = get_config_value("senha_max") 
        
         url = tree.item(parent)["values"][7]
         evento = tree.item(parent)["values"][1]
 
-        navegador1 = str.upper(tree.item(parent)["values"][4])
-        navegador2 = str.upper(tree.item(parent)["values"][4])
+        navegador = str.upper(tree.item(parent)["values"][4])
 
         chrome_1 = "ESQUERDA"
         chrome_2 = "DIREITA"
                      
     #    Checa se o checkChrome esta ativado:
-        if navegador1 == chrome_1 :
+        if navegador == chrome_1 :
         
          opt = Options()
          opt.add_argument("--js-flags=--max_old_space_size=4096")
@@ -3433,7 +5777,7 @@ def run_app():
          driverchrome1 = webdriver.Chrome(service=service, options=opt)
          # Localizando Prime Video
          if re.search('\\bprime\\b', plataform, re.IGNORECASE):
-          label_toolbar.config(text="Abrindo no navegador da esquerda a pagina do : "+plataform)
+          ui_safe(lambda:  label_toolbar.config(text="Abrindo no navegador da esquerda a pagina do : "+plataform))
           driverchrome1.get("https://www.primevideo.com/offers/nonprimehomepage/ref=atv_auth_signout")
         
         #   time.sleep(4)
@@ -3442,33 +5786,40 @@ def run_app():
          
           # Localizando Disney Plus
          elif re.search('\\bdazn\\b', plataform, re.IGNORECASE):
-          label_toolbar.config(text="Abrindo no navegador da esquerda a pagina do : "+plataform)                
+          ui_safe(lambda:  label_toolbar.config(text="Abrindo no navegador da esquerda a pagina do : "+plataform))                
         #   time.sleep(4)
           logindazn(url,user,pas,driverchrome1,timeantes,evento)
           break;
                         
                   # Localizando Disney Plus
          elif re.search('\\bcaze\\b', plataform, re.IGNORECASE):
-          label_toolbar.config(text="Abrindo no navegador da esquerda a pagina do : "+plataform)
+          ui_safe(lambda:  label_toolbar.config(text="Abrindo no navegador da esquerda a pagina do : "+plataform))
           ret = tentar_reproduzir_evento(driverchrome1,url)
           if ret:
-             label_toolbar.config(text="Em reprodução youtube "+evento)
+             ui_safe(lambda:  label_toolbar.config(text="Em reprodução youtube "+evento))
                         
           break;
        
         elif re.search('\\bdisney\\b', plataform, re.IGNORECASE):
-          label_toolbar.config(text="Abrindo no navegador da esquerda a pagina do : "+plataform)
+          ui_safe(lambda: label_toolbar.config(text="Abrindo no navegador da esquerda a pagina do : "+plataform))
           driverchrome1.get("https://www.disneyplus.com/identity/login/enter-email")
         #   time.sleep(4)
           logindisney(url,user,pas,driverchrome1,timeantes,evento)
           break;
+        
+        elif re.search('\\bmax\\b', plataform, re.IGNORECASE):
+          ui_safe(lambda:  label_toolbar.config(text="Abrindo no navegador da esquerda a pagina do : "+plataform))
+          driverchrome1.get("https://auth.hbomax.com/login")
+        #   time.sleep(4)
+          loginmax("",url,user,pas,driverchrome1,timeantes,evento)
+          break;
 
         
-        elif navegador2 == chrome_2 :
+        elif navegador == chrome_2 :
   
          if not verificar_chrome_debug("9224"):
             habilita_botoes()
-            label_toolbar.config(text="Chrome (9224) indisponível.")
+            ui_safe(lambda:  label_toolbar.config(text="Chrome (9224) indisponível."))
             return
 
          chrome_options = Options()
@@ -3480,7 +5831,7 @@ def run_app():
      
          # Localizando Prime Video
          if re.search('\\bprime\\b', plataform, re.IGNORECASE):
-          label_toolbar.config(text="Abrindo no navegador da direita a pagina do : "+plataform)
+          ui_safe(lambda:  label_toolbar.config(text="Abrindo no navegador da direita a pagina do : "+plataform))
           driverchrome2.get("https://www.primevideo.com/offers/nonprimehomepage/ref=atv_auth_signout")
         #   time.sleep(4)
 
@@ -3488,32 +5839,37 @@ def run_app():
           break;
          
          elif re.search('\\bdazn\\b', plataform, re.IGNORECASE):
-          label_toolbar.config(text="Abrindo no navegador da esquerda a pagina do : "+plataform)                
+          ui_safe(lambda:  label_toolbar.config(text="Abrindo no navegador da esquerda a pagina do : "+plataform))              
         #   time.sleep(4)
           logindazn(url,user,pas,driverchrome2,timeantes,evento)
           break;
                       
          
          elif re.search('\\bcaze\\b', plataform, re.IGNORECASE):
-          label_toolbar.config(text="Abrindo no navegador da esquerda a pagina do : "+plataform)
+          ui_safe(lambda:  label_toolbar.config(text="Abrindo no navegador da esquerda a pagina do : "+plataform))
           ret = tentar_reproduzir_evento(driverchrome2,url)
           if ret:
-             label_toolbar.config(text="Em reprodução youtube "+evento)
+             ui_safe(lambda:  label_toolbar.config(text="Em reprodução youtube "+evento))
 
           # Localizando Disney Plus
          elif re.search('\\bdisney\\b', plataform, re.IGNORECASE):
-          label_toolbar.config(text="Abrindo no navegador da direita a pagina do : "+plataform)
+          ui_safe(lambda:  label_toolbar.config(text="Abrindo no navegador da direita a pagina do : "+plataform))
           driverchrome2.get("https://www.disneyplus.com/identity/login/enter-email")
         #   time.sleep(4)
           logindisney(url,user,pas,driverchrome2,timeantes,evento)
+          break;
+   
+        elif re.search('\\bmax\\b', plataform, re.IGNORECASE):
+          ui_safe(lambda:  label_toolbar.config(text="Abrindo no navegador da esquerda a pagina do : "+plataform))
+          driverchrome2.get("https://auth.hbomax.com/login")
+        #   time.sleep(4)
+          loginmax(url,user,pas,driverchrome2,timeantes,evento)
           break;
          
    progresso.pack_forget()
    habilita_botoes()
    label_toolbarprocess.config(text="")
-   num_refresh = int(refresh_entry.get())
-   threadingTimer = Timer(num_refresh, run_app)
-   threadingTimer.start()  
+
 
  except TclError as e:
     logging.error(f"Erro ocorrido: {e}") 
@@ -3527,6 +5883,22 @@ def run_app():
          habilita_botoes()         
          update_command()
          pass
+ 
+ finally:
+        if conseguiu_trava:
+            thread_em_execucao = False
+
+        # Rearma SOMENTE se estiver rodando
+        if button_update["text"] == "Running":
+            num_refresh = int(refresh_entry.get())
+            threadingTimer = Timer(num_refresh, run_app)
+            threadingTimer.start()
+
+def ui_safe(fn):
+    try:
+        root.after(0, fn)
+    except Exception:
+        pass
 
 def obter_titulo_janelas():
     """ Obtém os títulos das janelas do Chrome via subprocess WMIC """
@@ -3645,37 +6017,45 @@ def obter_eventos_dazn_completo(driver):
     return eventos
 
 def converter_para_data_hora(texto):
-    hoje = datetime.now()
+    """
+    Converte textos como:
+    - 'Hoje: 20:40'
+    - 'Amanhã: 21:10'
+    - '21/01/2026 19:40'
+    Retorna (data_str, hora_str) ou (None, None) se inválido
+    """
+    if not texto:
+        return None, None
+
+    texto = texto.strip()
+    agora = datetime.now()
+
     try:
-        if texto.startswith("HOJE"):
-            hora = texto.replace("HOJE", "").strip()
-            data = hoje.strftime("%d/%m/%Y")
+        # --- HOJE ---
+        if texto.lower().startswith("hoje"):
+            hora = texto.split(":")[-1].strip()
+            data = agora.strftime("%d/%m/%Y")
+            return data, hora
 
-        elif texto[:3] in ["SEG", "TER", "QUA", "QUI", "SEX", "SÁB", "DOM"]:
-            dias_semana = ["SEG", "TER", "QUA", "QUI", "SEX", "SÁB", "DOM"]
-            hoje_idx = hoje.weekday()
-            alvo_idx = dias_semana.index(texto[:3])
-            dias_diff = (alvo_idx - hoje_idx + 7) % 7
-            data = (hoje + timedelta(days=dias_diff)).strftime("%d/%m/%Y")
-            hora = texto[3:].strip()
+        # --- AMANHÃ ---
+        if texto.lower().startswith("amanh"):
+            hora = texto.split(":")[-1].strip()
+            data = (agora + timedelta(days=1)).strftime("%d/%m/%Y")
+            return data, hora
 
-        elif len(texto.split()) == 3:  # Ex: "22 JUN 13:00"
-            dia, mes_abrev, hora = texto.split()
-            meses = {
-                "JAN": "01", "FEV": "02", "MAR": "03", "ABR": "04",
-                "MAI": "05", "JUN": "06", "JUL": "07", "AGO": "08",
-                "SET": "09", "OUT": "10", "NOV": "11", "DEZ": "12"
-            }
-            mes_num = meses.get(mes_abrev.upper(), "??")
-            ano = hoje.year
-            data = f"{dia.zfill(2)}/{mes_num}/{ano}"
+        # --- DATA COMPLETA ---
+        if " " in texto:
+            data, hora = texto.split(" ", 1)
+            datetime.strptime(data, "%d/%m/%Y")  # valida
+            return data, hora.strip()
 
-        else:
-            return "Data inválida"
-
-        return f"{data} {hora}"
+        # --- SOMENTE DATA ---
+        datetime.strptime(texto, "%d/%m/%Y")
+        return texto, "00:00"
 
     except Exception:
+        return None, None
+
         return "Data inválida"
 
 def logindazn(url,email,senha,driver,timeantes,evento):
@@ -3694,21 +6074,26 @@ def logindazn(url,email,senha,driver,timeantes,evento):
         button[0].click()
         
 
-        label_toolbar.config(text="Efetuando o login no site do DAZN...")
+        text="Efetuando o login no site do DAZN..."
 
         # Aguarda o campo de e-mail estar disponível
         time.sleep(3)
-        input_email = driver.find_element(By.XPATH, '//*[@id="email"]')
+        input_email = WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.ID, "email"))
+        )
+        input_email.clear()
         input_email.send_keys(email)
         input_email.send_keys(Keys.ENTER)
-        label_toolbar.config(text="Inserido usuario!")
+        input_email.send_keys(email)
+        input_email.send_keys(Keys.ENTER)
+        text="Inserido usuario!"
 
         # Aguarda o campo de senha carregar
         time.sleep(2)
         input_senha = driver.find_element(By.XPATH, '//*[@id="password"]')
         input_senha.send_keys(senha)
         input_senha.send_keys(Keys.ENTER)
-        label_toolbar.config(text="Inserido senha!")
+        text="Inserido senha!"
 
         # Aguarda possível redirecionamento pós-login
         time.sleep(8)
@@ -3721,14 +6106,14 @@ def logindazn(url,email,senha,driver,timeantes,evento):
 
         # Verifica se login teve sucesso com base na URL
         if "home" in driver.current_url or "account" in driver.current_url:
-            label_toolbar.config(text="✅ Login realizado com sucesso!")
+            text="✅ Login realizado com sucesso!"
             return True
         else:
-            label_toolbar.config(text="❌ Falha no login ou autenticação adicional necessária.")
+            text="❌ Falha no login ou autenticação adicional necessária."
             return False
 
     else:
-        label_toolbar.config(text="✅ Login realizado com sucesso!")
+         text="✅ Login realizado com sucesso!"
         
     driver.get(url)
 
@@ -3775,7 +6160,7 @@ def loginprime(url,us,passw,driver,tempo,evento):
         #    Exibe progressbar
        progresso.pack(side=RIGHT, padx=10, pady=5)
        
-       label_toolbar.config(text="Buscando elemento de pagina login...")
+       text="Buscando elemento de pagina login..."
        progresso["value"] = 10
        logging.info("Buscando elemento de pagina login!")
        user = driver.find_element(By.XPATH, '//*[@id="ap_email"]')
@@ -3804,7 +6189,7 @@ def loginprime(url,us,passw,driver,tempo,evento):
          user.send_keys(novo_valor)
         
         user.send_keys(Keys.ENTER) 
-        label_toolbar.config(text="Buscando elemento de senha login...")
+        text="Buscando elemento de senha login..."
         progresso["value"] = progresso["value"] + 10
         logging.info("Buscando elemento de senha login!")
         time.sleep(4)
@@ -3841,12 +6226,12 @@ def loginprime(url,us,passw,driver,tempo,evento):
        pas.send_keys(Keys.ENTER) 
        time.sleep(3)
   progresso["value"] = progresso["value"] + 10
-  label_toolbar.config(text="Abrindo a URL do evento: "+evento)
+  text="Abrindo a URL do evento: "+evento
   
   driver.get(url)
 
 #   Se após a autenticação mostrar o botão de login do prime maximizar clicar e voltar ao normal a janela
-  label_toolbar.config(text="Checando necessidade de reautenticação...")
+  text="Checando necessidade de reautenticação..."
   if len(driver.find_elements(By.XPATH, '//*[@id="pv-nav-container"]/div/div[2]/ul/li[5]/a')) > 0:  
 
         #  tamanho_normal = driver.get_window_size()
@@ -3869,7 +6254,7 @@ def loginprime(url,us,passw,driver,tempo,evento):
     # driver.maximize_window()
     time.sleep(3)
     progresso["value"] = progresso["value"] + 10
-    label_toolbar.config(text="Aguardando presença do botão do player para o evento: "+evento)
+    text="Aguardando presença do botão do player para o evento: "+evento
     clicar_com_espera_segura(driver,'//*[@role="button"]')
     # WebDriverWait(driver,10).until(EC.element_to_be_clickable((By.XPATH,'//*[@role="button"]'))).click()
 
@@ -3877,7 +6262,7 @@ def loginprime(url,us,passw,driver,tempo,evento):
 #   Botão de watch live em janela pequena apos clicar em webwait caso apareça
 
     if len(driver.find_elements(By.XPATH, '/html/body/div[3]/div/div/div/div[2]/div/span[3]/div/div[1]/a')) > 0:  
-      label_toolbar.config(text="Clicou no sub botão do player... ")
+      text="Clicou no sub botão do player... "
       driver.find_element(By.XPATH, '/html/body/div[3]/div/div/div/div[2]/div/span[3]/div/div[1]/a').click()
       time.sleep(2)
       
@@ -3887,13 +6272,13 @@ def loginprime(url,us,passw,driver,tempo,evento):
     if len(driver.find_elements(By.XPATH, '//*[@id="dv-web-player"]/div/div[2]/div/div/div/div/div[1]/div[8]/div/div/div[1]/div/div/div')) > 0:
          driver.find_element(By.XPATH, '//*[@id="dv-web-player"]/div/div[2]/div/div/div/div/div[1]/div[8]/div/div/div[1]/div/div/div').click()
          progresso["value"] = progresso["value"] + 10
-         label_toolbar.config(text="Clicou no check de  permissão para conteúdo sensivel...")
+         text="Clicou no check de  permissão para conteúdo sensivel..."
              
             #  Clicar no botão de evento mature themes
          time.sleep(2)
          driver.find_element(By.XPATH, '//*[@id="dv-web-player"]/div/div[2]/div/div/div/div/div[1]/div[8]/div/div/div[2]/button[2]').click()
          progresso["value"] = progresso["value"] + 10
-         label_toolbar.config(text="Clicou no botão para permissão para conteúdo sensivel...")
+         text="Clicou no botão para permissão para conteúdo sensivel..."
   
   # Espera até o botão estar clicável e clica
   botao_close = WebDriverWait(driver, 10).until(
@@ -3901,7 +6286,7 @@ def loginprime(url,us,passw,driver,tempo,evento):
   )
   botao_close.click()
   progresso["value"] = 100
-  label_toolbar.config(text="Em reprodução do evento: "+evento)
+  text="Em reprodução do evento: "+evento
   time.sleep(2)
   label_toolbarprocess.config(text="")
   progresso.pack_forget()
@@ -3919,48 +6304,123 @@ def loginprime(url,us,passw,driver,tempo,evento):
          habilita_botoes() 
          pass
   
-def loginmax(url,us,passw,driver):
+def loginmax(url_plataform, url, us, passw, driver, tempo, evento):
+    global driverchrome
 
- global driverchrome
-#   user max= luiz.lemos@kantaribopemedia.com9427 pass = Kantar1234
-#
+    try:
 
- try: 
-  
-  
-   user = driver.find_elements(By.XPATH, '//*[@id="login-email-input"]')
+        if driver.findelements(By.XPATH,'//*[@id="header-secondary-cta"]'):
 
-   if len(user) > 0:      
-       logging.info("Buscando elemento de pagina login!")
-       user = driver.find_element(By.CSS_SELECTOR, '#login-email-input')
-       user.clear()
-       time.sleep(2)
-       user.send_keys(us) 
-       user.clear()
-       user.send_keys(us) 
-       time.sleep(2)
-    #    user.send_keys(Keys.ENTER) 
-       logging.info("Buscando elemento de senha login!")
-       time.sleep(2)
-       pas = driver.find_element(By.XPATH, '//*[@id="login-password-input"]')
-       pas.clear()
-       pas.send_keys(passw) 
-       pas.send_keys(Keys.ENTER) 
-       time.sleep(3)
-       driverchrome.get(url)
-       time.sleep(4)
-           
-   if len(driver.find_elements(By.XPATH, '//*[@id="layer-root-app-content"]/div/main/div/div[1]/div/div[3]/button')) > 0:
 
-           driver.find_element(By.XPATH, '//*[@id="layer-root-app-content"]/div/main/div/div[1]/div/div[3]/button').click()
-  
-       
- except Exception as e: 
-         logging.error(f"Erro ocorrido: {e}") 
-         exc_type, exc_obj, exc_tb = sys.exc_info()
-         fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-         habilita_botoes()
-         pass
+            driver.get(url_plataform)
+            time.sleep(6)
+
+            label_toolbarprocess.config(text="Evento encontrado")
+            progresso["value"] = 10
+            progresso.pack(side=RIGHT, padx=10, pady=5)
+
+            text="Localizando campo de login (Shadow DOM)..."
+            logging.info("Localizando campo de login (Shadow DOM)")
+
+            # ================================
+            # LOGIN (EMAIL / TELEFONE)
+            # ================================
+            user = driver.execute_script("""
+                const giLogin = document.querySelector('gi-login');
+                if (!giLogin) return null;
+
+                const root1 = giLogin.shadowRoot;
+                if (!root1) return null;
+
+                const emailComp = root1.querySelector('gi-sign-in-email');
+                if (!emailComp) return null;
+
+                const root2 = emailComp.shadowRoot;
+                if (!root2) return null;
+
+                const input = root2.querySelector('#sign-in-email-input');
+                return input;
+            """)
+
+            if user is None:
+                raise Exception("Campo de login não encontrado (Shadow DOM)")
+
+
+            driver.execute_script("arguments[0].value = '';", user)
+            user.send_keys(us)
+            user.send_keys(Keys.ENTER)
+
+            progresso["value"] += 20
+        
+            time.sleep(6)
+
+            # ================================
+            # SENHA
+            # ================================
+            text="Localizando campo de senha (Shadow DOM)..."
+
+            password = driver.execute_script("""
+                const giLogin = document.querySelector("gi-login");
+                if (!giLogin || !giLogin.shadowRoot) return null;
+
+                const passStep = giLogin.shadowRoot.querySelector("gi-sign-in-password");
+                if (!passStep || !passStep.shadowRoot) return null;
+
+                const pwdComp = passStep.shadowRoot.querySelector("gi-password-input");
+                if (!pwdComp || !pwdComp.shadowRoot) return null;
+
+                return pwdComp.shadowRoot.querySelector('input[type="password"]');
+            """)
+
+            if password is not None:
+            
+                driver.execute_script("arguments[0].value = '';", password)
+                password.send_keys(passw)
+                password.send_keys(Keys.ENTER)
+
+                progresso["value"] += 20
+                time.sleep(6)
+
+        # ================================
+        # ABRIR EVENTO
+        # ================================
+        text="Abrindo evento: " + evento
+        driver.get(url)
+        time.sleep(5)
+
+        if evento != "Novos":
+            if len(driver.find_elements(By.XPATH, '//*[@class="webPlayerUIContainer"]')) > 0:
+                time.sleep(8)
+
+            progresso["value"] += 20
+            text="Ativando player..."
+            clicar_com_espera_segura(driver, '//*[@role="button"]')
+
+        # ================================
+        # FINAL
+        # ================================
+        progresso["value"] = 100
+        text="Em reprodução do evento: " + evento
+        label_toolbarprocess.config(text="")
+        progresso.pack_forget()
+
+    except Exception as e:
+        logging.error(f"Erro ocorrido: {e}")
+        exc_type, exc_obj, exc_tb = sys.exc_info()
+        fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+        habilita_botoes()
+        
+def find_in_shadow(driver, selectors):
+    script = "let el = document;"
+    for sel in selectors:
+        script += f"""
+        el = el.querySelector('{sel}');
+        if (!el) return null;
+        if (el.shadowRoot) el = el.shadowRoot;
+        """
+    script += "return el;"
+    return driver.execute_script(script)
+
      
 def logindisney(url,us,passw,driver,tempo,evento):
 
@@ -4068,7 +6528,7 @@ def logindisney(url,us,passw,driver,tempo,evento):
             pass
            
     progresso["value"] = 100
-    label_toolbar.config(text="Em reprodução do evento: "+evento)
+    text="Em reprodução do evento: "+evento
     time.sleep(2)
     label_toolbarprocess.config(text="")
     progresso.pack_forget()
@@ -4163,21 +6623,23 @@ def impedir_minimizacao(nome_janela):
 atualizacao_em_andamento = False
 
 def checar_update():
-    """Função para iniciar a verificação de atualização em thread separada"""
-    def atualizacao_completa():
-        global atualizacao_em_andamento
-        
-        if atualizacao_em_andamento:
-            return
-            
-        atualizacao_em_andamento = True
+    """Verifica atualização sem travar UI, scheduler ou agendamentos"""
+    global atualizacao_em_andamento
+
+    if atualizacao_em_andamento:
+        return
+
+    atualizacao_em_andamento = True
+    label_toolbar.config(text="🔍 Verificando atualizações...")
+
+    def worker():
+        nonlocal updater, nova_versao
         try:
-            # Configuração do updater
             updater = Update(
-                label=label_toolbar,
-                sftp_host="mediaftp.kantaribopemedia.com",
+                label=None,  # ❌ nunca UI em thread
+                sftp_host="sftp.kantaribopemedia.com",
                 sftp_user="suportemdna",
-                sftp_pass="Kafjtwev2018MO",
+                sftp_pass="Kafjtwev2018MO@",
                 remote_path="suportemdna/Streaming_Scheduller",
                 version_file="version.txt",
                 update_file="update.zip",
@@ -4185,79 +6647,82 @@ def checar_update():
                 app_exe="Streaming_Scheduler.exe",
             )
 
-            # Verificar atualização
-            label_toolbar.config(text="🔍 Verificando atualizações...")
-            root.update()
+            tem_update = updater.verificar_atualizacao()
 
-            if not updater.verificar_atualizacao():
-                label_toolbar.config(text="✅ Sistema atualizado")
+            if not tem_update:
+                root.after(0, lambda: finalizar("✅ Sistema atualizado"))
                 return
 
-            # Mostrar versão disponível
             with open("version.txt", "r") as f:
                 nova_versao = f.read().strip()
 
-            # Cria um diálogo modal personalizado com tamanho reduzido
-            dialog = Toplevel(root)
-            dialog.title("Atualização Disponível")
-            dialog.resizable(False, False)
-            dialog.grab_set()  # Torna modal
-            
-            # Tamanho reduzido (300x150) e centralizado
-            dialog_width = 300
-            dialog_height = 150
-            pos_x = root.winfo_x() + (root.winfo_width() // 2) - (dialog_width // 2)
-            pos_y = root.winfo_y() + (root.winfo_height() // 2) - (dialog_height // 2)
-            dialog.geometry(f"{dialog_width}x{dialog_height}+{pos_x}+{pos_y}")
-            
-            # Conteúdo do diálogo compacto
-            Label(dialog, text=f"Versão {nova_versao} disponível!", 
-                 pady=5, font=('Arial', 10, 'bold')).pack()
-            Label(dialog, text="Deseja instalar agora?", pady=5).pack()
-            
-            resposta = BooleanVar()
-            
-            def sim():
-                resposta.set(True)
-                dialog.destroy()
-                
-            def nao():
-                resposta.set(False)
-                dialog.destroy()
-                
-            # Botões compactos e alinhados
-            Button(dialog, text="Sim", command=sim, width=8).pack(side=LEFT, padx=10, pady=5, expand=True)
-            Button(dialog, text="Não", command=nao, width=8).pack(side=RIGHT, padx=10, pady=5, expand=True)
-            
-            # Espera até que o diálogo seja fechado
-            root.wait_window(dialog)
-            
-            if not resposta.get():
-                label_toolbar.config(text="Atualização cancelada")
-                return
+            root.after(0, mostrar_dialogo)
 
-            # Preparar atualização (cria o update.bat)
+        except Exception as e:
+            logging.error(f"❌ Erro no update: {e}", exc_info=True)
+            root.after(0, lambda: finalizar("❌ Falha ao verificar atualização"))
+
+    def mostrar_dialogo():
+        dialog = Toplevel(root)
+        dialog.title("Atualização Disponível")
+        dialog.resizable(False, False)
+        dialog.grab_set()
+
+        dialog_width = 300
+        dialog_height = 150
+        pos_x = root.winfo_x() + (root.winfo_width() // 2) - (dialog_width // 2)
+        pos_y = root.winfo_y() + (root.winfo_height() // 2) - (dialog_height // 2)
+        dialog.geometry(f"{dialog_width}x{dialog_height}+{pos_x}+{pos_y}")
+
+        Label(
+            dialog,
+            text=f"Versão {nova_versao} disponível!",
+            font=("Arial", 10, "bold"),
+            pady=10
+        ).pack()
+
+        Label(dialog, text="Deseja instalar agora?").pack(pady=5)
+
+        def confirmar():
+            dialog.destroy()
+            iniciar_instalacao()
+
+        def cancelar():
+            dialog.destroy()
+            finalizar("Atualização cancelada")
+
+        Button(dialog, text="Sim", width=8, command=confirmar).pack(side=LEFT, padx=20, pady=10)
+        Button(dialog, text="Não", width=8, command=cancelar).pack(side=RIGHT, padx=20, pady=10)
+
+    def iniciar_instalacao():
+        try:
             label_toolbar.config(text="🛠 Preparando atualização...")
-            root.update()
 
             if not updater.preparar_atualizacao():
-                raise Exception("Falha ao preparar arquivos de atualização")
+                raise Exception("Falha ao preparar atualização")
 
-            # Salvar configurações antes de atualizar
             label_toolbar.config(text="💾 Salvando configurações...")
             salvar()
 
-            # Contagem regressiva
-            for i in range(3, 0, -1):
+            def countdown(i=3):
+                if i == 0:
+                    executar_update()
+                    return
                 label_toolbar.config(text=f"🔄 Reiniciando em {i}s...")
-                root.update()
-                time.sleep(1)
+                root.after(1000, lambda: countdown(i - 1))
 
-            # Executar a atualização
+            countdown()
+
+        except Exception as e:
+            logging.error(f"❌ Erro ao instalar update: {e}", exc_info=True)
+            finalizar("❌ Falha ao instalar atualização")
+
+    def executar_update():
+        try:
             if platform.system() == "Windows":
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                
+
                 subprocess.Popen(
                     "update.bat",
                     shell=True,
@@ -4266,25 +6731,27 @@ def checar_update():
                 )
                 root.destroy()
                 sys.exit(0)
+        except Exception as e:
+            logging.error(f"❌ Falha ao executar update.bat: {e}", exc_info=True)
+            finalizar("❌ Erro ao reiniciar")
 
-            atualizacao_em_andamento = False
+    def finalizar(msg):
+        global atualizacao_em_andamento
+        label_toolbar.config(text=msg)
+        atualizacao_em_andamento = False
 
-        except Exception as e:   
-            logging.error(f"❌ Erro na atualização: {str(e)}")
+        # limpeza segura
+        for temp_file in ("version.txt", "update.zip", "update.bat"):
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except:
+                    pass
 
-            # Limpeza de arquivos temporários
-            for temp_file in ["version.txt", "update.zip", "update.bat"]:
-                if os.path.exists(temp_file):
-                    try:
-                        os.remove(temp_file)
-                    except:
-                        pass
-        finally:
-            atualizacao_em_andamento = False
+    updater = None
+    nova_versao = ""
 
-    # Inicia a thread de atualização
-    thread = threading.Thread(target=atualizacao_completa, daemon=True)
-    thread.start()
+    threading.Thread(target=worker, daemon=True).start()
     
 
 def obter_versao():
@@ -4309,19 +6776,17 @@ def checa_botao_start(get_botao_func):
 def loadversion():
     label_version.config(text=obter_versao())
 
-# def criptograrunicavez():
-    # tree = ET.parse("config.xml")
-    # root = tree.getroot()
+def criptograrunicavez():
+    tree = ET.parse("config.xml")
+    root = tree.getroot()
 
-    # # Substitui os campos sensíveis por versões criptografadas
-    # root.find("usuario_prime").text = criptografar("11982749388")
-    # root.find("senha_prime").text = criptografar("Kantar123")
-    # root.find("usuario_disney").text = criptografar("luiz.lemos@kantaribopemedia.com")
-    # root.find("senha_disney").text = criptografar("Kantar123")
+    # Substitui os campos sensíveis por versões criptografadas
+    root.find("usuario_max").text = criptografar("luiz.lemos@kantaribopemedia.com")
+    root.find("senha_max").text = criptografar("Kantar1234")
 
-    # # Salva de volta
-    # tree.write("config.xml", encoding="utf-8", xml_declaration=True)
-    #logging.info("Config.xml criptografado com sucesso.")
+    # Salva de volta
+    tree.write("config.xml", encoding="utf-8", xml_declaration=True)
+    logging.info("Config.xml criptografado com sucesso.")
 
     # tree = ET.parse("auth.xml")
     # root = tree.getroot()
@@ -4332,7 +6797,7 @@ def loadversion():
     # tree.write("auth.xml", encoding="utf-8", xml_declaration=True)
 
 
-     # from crypto_utils import gerar_chave
+    # from crypto_utils import gerar_chave
     # gerar_chave()
     # valor = "AIzaSyB9ac-XdyMI13A_LBe1-CXkj9AcYF3VX9o"
     # cripto = criptografar(valor)
@@ -4341,49 +6806,28 @@ def loadversion():
     #     f.write(f"YOUTUBE_API_KEY={cripto}\n")
 
 if __name__ == "__main__":
- try:
-    # load_csv()
-    # fechar_instancia("Streaming_Scheduler.exe")
-    root = Tk()
-    app = App(root)    
-    # criptograrunicavez()
-    add()
-    carrega_config_xml()
-    load_csv_inicio()
-    ajustartodootree()
-   
-    # update_chrome1()
-    # update_chrome2()
-    time.sleep(3)
-   
-    time.sleep(5)
-    limpar_arquivo_periodicamente("log.txt")
-    # Checar versão atual
-    loadversion()
-    # ao abrir já abre em running
-    update_command()
-    # Checa se os navegadores estão abertos senao abre
-    if not verificar_chrome_debug("9222"):
-            habilita_botoes()
-            label_toolbar.config(text="Chrome (9222) indisponível.")            
-    if not verificar_chrome_debug("9224"):
-            habilita_botoes()
-            label_toolbar.config(text="Chrome (9224) indisponível.")
-    # checa se o botão está em start
-    checa_botao_start(button_update)
-   
-    root.focus_force()
- except Exception as e: 
-         logging.error(f"Erro ocorrido: {e}") 
-         exc_type, exc_obj, exc_tb = sys.exc_info()
-         fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-         habilita_botoes()  
-         update_command()
-         pass
- 
-     # Mantém o script principal rodando
-          
- root.mainloop()    
+    try:
+        root = Tk()
+        app = App(root)
+        add()
+        carrega_config_xml()
+        load_csv_inicio()
+        ajustartodootree()
+        
+        time.sleep(3)
+        time.sleep(5)
+        limpar_arquivo_periodicamente("log.txt")
+        loadversion()
+        root.after(2000, update_command)
+
+        checa_botao_start(button_update)
+        root.focus_force()
+        root.mainloop()
+    except Exception as e:
+        logging.error(f"Erro fatal na inicialização: {e}")
+        habilita_botoes()
+        if 'root' in locals():
+            root.mainloop()
 
 
 

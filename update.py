@@ -173,9 +173,17 @@ exit /b 0
 
     def atualizar_label(self, mensagem):
         """Atualiza o label na interface de forma segura."""
-        if self.label.winfo_exists():
-            self.label.config(text=mensagem)
-            self.label.update_idletasks()
+        try:
+            if self.label is None:
+                return
+            if not hasattr(self.label, "winfo_exists"):
+                return
+            if self.label.winfo_exists():
+                self.label.config(text=mensagem)
+                self.label.update_idletasks()
+        except Exception:
+            # nunca deixar update quebrar a aplicação
+            pass
 
     def testar_conexao_sftp(self):
         """Testa a conexão SFTP com tratamento de erros."""
@@ -249,7 +257,7 @@ exit /b 0
             except:
                 pass
 
-    def verificar_atualizacao(self):
+    def verificar_atualizacao(self, timeout=30):
      """Verifica e gerencia atualizações sem usar arquivos temporários"""
      try:
         # 1. Verificação inicial
@@ -263,7 +271,7 @@ exit /b 0
             return False
 
         # 3. Baixa versão remota diretamente para version.txt
-        if not self.baixar_arquivo_sftp(self.version_file, "version.txt"):
+        if not self.baixar_arquivo_sftp(self.version_file, "version.txt",timeout=timeout):
             return False
 
         # 4. Processa versões

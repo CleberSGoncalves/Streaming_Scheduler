@@ -31,6 +31,7 @@ secret.key
 *.log
 *.error.log
 log.txt
+token_KantarWare.txt
 app.log
 update.log
 update_error.log
@@ -73,3 +74,11 @@ update*.bat
 *.tmp
 *.old
 *.swp
+*.pdf
+*.html
+bkp/
+prime_bkp.txt
+debug_*.py
+dump_*.py
+list_*.py
+test_*.py
