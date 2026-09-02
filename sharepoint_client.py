@@ -266,8 +266,9 @@ def _post_to_sharepoint_direct(events: List[Dict[str, Any]]) -> Dict[str, Any]:
             if not camp or not part or not dt_raw:
                 continue
 
-            # Data ISO
-            data_iso = dt_raw if "T" in dt_raw else f"{dt_raw}T00:00:00Z"
+            # Data ISO para coluna dateOnly no SharePoint:
+            # Usa T12:00:00Z para garantir que no fuso UTC-3 (Brasil) a data permaneça exatamente no mesmo dia
+            data_iso = f"{dt_raw[:10]}T12:00:00Z" if not "T" in dt_raw else (f"{dt_raw[:10]}T12:00:00Z" if "T00:00:00" in dt_raw else dt_raw)
             d_short = dt_raw[:10]
 
             # Chave do evento
