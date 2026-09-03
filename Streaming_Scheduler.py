@@ -4814,12 +4814,8 @@ def run_busca_eventos(ignorar_trava=False):
                         tree.insert("", "end", values=csv_list)
                         var_navegador = "Direita" if var_navegador == "Esquerda" else "Esquerda"
 
-        # 🔥 NOVO PIPELINE CBF (PDF) - Rodando por último e pulando o que Selenium já encontrou
-        if is_selected_plat("CBF"):
-            logging.info("Acionando pipeline CBF...")
-            run_eventos_cbf()
-
         # ── Campeonatos Extras (cadastrados na aba ⚽ Campeonatos) ─────────────
+        # Roda ANTES da CBF para que as plataformas oficiais tenham prioridade sobre o PDF
         try:
             _scraper_map = {
                 "Amazon Prime": run_eventos_prime,
@@ -4863,6 +4859,11 @@ def run_busca_eventos(ignorar_trava=False):
                 remover_duplicatas(tree)
         except Exception as e_dyn:
             logging.error(f"[CampExtras] Erro geral no pipeline dinâmico: {e_dyn}")
+
+        # 🔥 PIPELINE CBF (PDF/Excel) - Roda por último e pula o que as plataformas já encontraram
+        if is_selected_plat("CBF"):
+            logging.info("Acionando pipeline CBF...")
+            run_eventos_cbf()
 
         padronizar_nomes_grid(tree)
         remover_duplicatas(tree)
@@ -5146,7 +5147,25 @@ def remover_duplicatas(tree):
                 continue
             
             if chave in itens_unicos:
-                itens_para_remover.add(item)
+                item_existente = itens_unicos[chave]
+                values_exist = tree.item(item_existente, 'values')
+                
+                # Regra de Prioridade: Plataforma de Streaming Oficial > CBF (PDF)
+                camp_exist = str(values_exist[0]).upper() if len(values_exist) > 0 else ""
+                url_exist = str(values_exist[7]).lower() if len(values_exist) > 7 else ""
+                is_cbf_exist = "CBF" in camp_exist or url_exist.endswith(".pdf")
+                
+                camp_novo = str(values[0]).upper() if len(values) > 0 else ""
+                url_novo = str(values[7]).lower() if len(values) > 7 else ""
+                is_cbf_novo = "CBF" in camp_novo or url_novo.endswith(".pdf")
+                
+                if is_cbf_exist and not is_cbf_novo:
+                    # O item existente é da CBF e o novo é da plataforma direta: Descarta a CBF e mantém a plataforma!
+                    itens_para_remover.add(item_existente)
+                    itens_unicos[chave] = item
+                else:
+                    # O item existente já é da plataforma ou ambos são do mesmo tipo: Descarta o novo
+                    itens_para_remover.add(item)
                 duplicatas += 1
             else:
                 itens_unicos[chave] = item

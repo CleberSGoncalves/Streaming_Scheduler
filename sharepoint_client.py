@@ -51,13 +51,68 @@ def _normalizar_texto(txt: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]", "", sem_acento).lower()
 
 
+def _normalizar_campeonato(camp: str) -> str:
+    """Normaliza o nome do campeonato removendo prefixos como 'CBF - ' para unificar chaves."""
+    if not camp:
+        return ""
+    c = str(camp).strip()
+    c = re.sub(r"^cbf\s*[-–—:]*\s*", "", c, flags=re.IGNORECASE)
+    return _normalizar_texto(c)
+
+
+def _deep_normalize_partida(match_name: str) -> tuple:
+    """Normaliza nome da partida para tupla ordenada de times (ex: ('botafogo', 'palmeiras'))."""
+    if not match_name:
+        return ("",)
+    
+    def norm_team(t):
+        if not t:
+            return ""
+        t = str(t).lower()
+        nfkd = unicodedata.normalize("NFKD", t)
+        t = "".join([c for c in nfkd if not unicodedata.combining(c)])
+        t = t.replace("-", " ").replace(".", " ").replace("_", " ")
+        replacements = {
+            r"\bvasco da gama\b": "vasco",
+            r"\bathletico paranaense\b": "athletico",
+            r"\batletico paranaense\b": "athletico",
+            r"\bathletico pr\b": "athletico",
+            r"\batletico pr\b": "athletico",
+            r"\batletico mineiro\b": "atletico",
+            r"\batletico mg\b": "atletico",
+            r"\batletico goianiense\b": "atletico go",
+            r"\batletico go\b": "atletico go",
+            r"\bred bull bragantino\b": "bragantino",
+            r"\brb bragantino\b": "bragantino",
+            r"\besporte clube\b": "",
+            r"\be c\b": "",
+            r"\bf c\b": "",
+            r"\bfc\b": "",
+            r"\bec\b": "",
+            r"\bsaf\b": "",
+            r"\bclube de regatas\b": "",
+        }
+        for pattern, rep in replacements.items():
+            t = re.sub(pattern, rep, t)
+        return re.sub(r"\s+", " ", t).strip()
+
+    text_work = re.sub(r"\s+[vVxX]\s+", " x ", str(match_name))
+    parts = text_work.lower().split(" x ")
+    if len(parts) >= 2:
+        t1, t2 = norm_team(parts[0]), norm_team(parts[1])
+        return tuple(sorted([t1, t2]))
+    return (norm_team(match_name),)
+
+
 def _gerar_chave_evento(camp: str, part: str, data_iso: str, hora: str) -> str:
     """Gera chave composta única para o evento (evita duplicação no SharePoint)."""
-    c_clean = _normalizar_texto(camp)
-    p_clean = _normalizar_texto(part)
+    c_clean = _normalizar_campeonato(camp)
+    p_tuple = _deep_normalize_partida(part)
+    p_clean = "x".join(p_tuple) if p_tuple != ("",) else _normalizar_texto(part)
     d_clean = re.sub(r"[^0-9]", "", data_iso[:10]) if data_iso else ""
     h_clean = re.sub(r"[^0-9]", "", str(hora)) if hora else ""
     return f"{c_clean}_{p_clean}_{d_clean}_{h_clean}"
+
 
 
 def _mapear_canal(canal_raw: Any) -> List[str]:
@@ -221,12 +276,18 @@ def _post_to_sharepoint_direct(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     # 1. Carrega eventos existentes no SharePoint para desduplicação (por período de datas dos eventos)
     existing_chaves = set()
     existing_tuples = set()
+    existing_match_dates = set()
     try:
         datas = [str(ev.get("Data", ""))[:10] for ev in events if ev.get("Data")]
         if datas:
             min_date = min(datas)
             max_date = max(datas)
-            filter_str = f"fields/Data ge '{min_date}T00:00:00Z' and fields/Data le '{max_date}T23:59:59Z'"
+            try:
+                min_dt = (datetime.strptime(min_date, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+                max_dt = (datetime.strptime(max_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+            except Exception:
+                min_dt, max_dt = min_date, max_date
+            filter_str = f"fields/Data ge '{min_dt}T00:00:00Z' and fields/Data le '{max_dt}T23:59:59Z'"
             url_query = f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists/{list_id}/items?expand=fields&$filter={filter_str}&$top=999"
         else:
             url_query = f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists/{list_id}/items?expand=fields&$top=500"
@@ -239,12 +300,15 @@ def _post_to_sharepoint_direct(events: List[Dict[str, Any]]) -> Dict[str, Any]:
                 ch = f.get("ChaveEvento")
                 if ch:
                     existing_chaves.add(str(ch).strip())
-                c_val = _normalizar_texto(f.get("Title"))
+                c_val = _normalizar_campeonato(f.get("Title"))
                 p_val = _normalizar_texto(f.get("Partida"))
+                p_tuple = _deep_normalize_partida(f.get("Partida"))
                 d_val = str(f.get("Data", ""))[:10]
                 h_val = str(f.get("Hor_x00e1_rio", "")).strip()
                 if c_val and p_val and d_val:
                     existing_tuples.add((c_val, p_val, d_val, h_val))
+                if p_tuple != ("",) and d_val:
+                    existing_match_dates.add((p_tuple, d_val))
     except Exception as e:
         logger.warning("[SharePoint Direct] Não foi possível pré-carregar lista existente: %s. A validação de unicidade do SharePoint garantirá a desduplicação.", e)
 
@@ -273,10 +337,12 @@ def _post_to_sharepoint_direct(events: List[Dict[str, Any]]) -> Dict[str, Any]:
 
             # Chave do evento
             chave = _gerar_chave_evento(camp, part, data_iso, hora)
+            p_tuple = _deep_normalize_partida(part)
 
-            # Verifica se já existe na memória
-            tuple_check = (_normalizar_texto(camp), _normalizar_texto(part), d_short, hora)
-            if chave in existing_chaves or tuple_check in existing_tuples:
+            # Verifica se já existe na memória (por Chave, por Tuple ou por Jogo+Data)
+            tuple_check = (_normalizar_campeonato(camp), _normalizar_texto(part), d_short, hora)
+            if chave in existing_chaves or tuple_check in existing_tuples or (p_tuple != ("",) and (p_tuple, d_short) in existing_match_dates):
+                logger.info("[SharePoint Direct] Jogo '%s' em %s já existe no SharePoint (duplicata evitada). Ignorado.", part, d_short)
                 skipped_count += 1
                 continue
 
@@ -305,11 +371,15 @@ def _post_to_sharepoint_direct(events: List[Dict[str, Any]]) -> Dict[str, Any]:
                 inserted_count += 1
                 existing_chaves.add(chave)
                 existing_tuples.add(tuple_check)
+                if p_tuple != ("",):
+                    existing_match_dates.add((p_tuple, d_short))
             elif r_ins.status_code == 400 and ("unique" in r_ins.text.lower() or "already has the provided value" in r_ins.text.lower()):
                 # O SharePoint rejeitou com restrição de unicidade (item já existe no banco)
                 skipped_count += 1
                 existing_chaves.add(chave)
                 existing_tuples.add(tuple_check)
+                if p_tuple != ("",):
+                    existing_match_dates.add((p_tuple, d_short))
                 logger.info("[SharePoint Direct] Evento '%s' já existia na lista. Ignorado com sucesso.", part)
             else:
                 err_msg = f"Erro {r_ins.status_code} ao inserir '{part}': {r_ins.text}"
