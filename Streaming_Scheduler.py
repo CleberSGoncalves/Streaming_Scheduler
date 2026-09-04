@@ -34,7 +34,9 @@ if not logging.getLogger().handlers:
 # ---- Thread-safe Tk wrappers ----
 _TS_ROOT = None
 import queue
+import gc
 _ui_queue = queue.Queue()
+_UI_QUEUE_RUNNING = False
 
 def _process_ui_queue():
     while True:
@@ -74,9 +76,11 @@ def _wrap_ui_func(func):
     return _inner
 
 def install_threadsafe_ui(root):
-    global _TS_ROOT
+    global _TS_ROOT, _UI_QUEUE_RUNNING
     _TS_ROOT = root
-    _process_ui_queue()
+    if not _UI_QUEUE_RUNNING:
+        _UI_QUEUE_RUNNING = True
+        _process_ui_queue()
     try:
         import tkinter as tk
         import tkinter.ttk as ttk
@@ -5833,6 +5837,13 @@ def run_app():
     #    Checa se o checkChrome esta ativado:
         if navegador == chrome_1 :
         
+         if driverchrome1 is not None:
+             try:
+                 driverchrome1.quit()
+             except Exception:
+                 pass
+             driverchrome1 = None
+
          opt = Options()
          opt.add_argument("--js-flags=--max_old_space_size=4096")
          opt.add_experimental_option("debuggerAddress", "127.0.0.1:9222")
@@ -5885,6 +5896,13 @@ def run_app():
             habilita_botoes()
             ui_safe(lambda:  label_toolbar.config(text="Chrome (9224) indisponível."))
             return
+
+         if driverchrome2 is not None:
+             try:
+                 driverchrome2.quit()
+             except Exception:
+                 pass
+             driverchrome2 = None
 
          chrome_options = Options()
          chrome_options.add_argument("--js-flags=--max_old_space_size=4096")
@@ -5951,6 +5969,11 @@ def run_app():
  finally:
         if conseguiu_trava:
             thread_em_execucao = False
+
+        try:
+            gc.collect()
+        except Exception:
+            pass
 
         # Rearma SOMENTE se estiver rodando
         if button_update["text"] == "Running":
