@@ -5505,32 +5505,43 @@ def tentar_reproduzir_evento(driver, url):
         habilita_botoes()
         return False
 
+_loop_verificacao_id = None
+
 def update_command():
-    global threadingTimer
+    global _loop_verificacao_id
 
     try:
         if button_update["text"] == "Running":
             button_update["text"] = "Start"
             button_update["fg"] = "green"
 
-            if threadingTimer is not None:
-                threadingTimer.cancel()
-                threadingTimer = None
+            if _loop_verificacao_id is not None:
+                try:
+                    root.after_cancel(_loop_verificacao_id)
+                except Exception:
+                    pass
+                _loop_verificacao_id = None
             return
 
         if button_update["text"] == "Start":
-            root.after(1000, loop_verificacao)
             button_update["text"] = "Running"
             button_update["fg"] = "red"
+            loop_verificacao()
             return
 
     except Exception as e:
         logging.exception(f"Erro em update_command: {e}")
 
 def loop_verificacao():
+    global _loop_verificacao_id
     if button_update["text"] == "Running":
         iniciar_thread(run_app)
-        root.after(30000, loop_verificacao)  # 30s
+        try:
+            num_refresh = int(refresh_entry.get())
+        except Exception:
+            num_refresh = 20
+        intervalo_ms = max(5, num_refresh) * 1000
+        _loop_verificacao_id = root.after(intervalo_ms, loop_verificacao)
  
 def iniciar_thread(metodo):
     """Inicia a thread e captura erros com log e envio para Telegram"""
@@ -5735,12 +5746,6 @@ def run_app():
          if agora >= alvo and _ultima_janela_envio.date() != agora.date():
              logging.info(f"[AGENDADO] Horário atingido ({hora_cfg}). Executando tarefa_diaria em segundo plano...")
              threading.Thread(target=tarefa_diaria).start()
-             
-             # Rearma o timer e encerra este tick
-             if button_update["text"] == "Running":
-                 num_refresh = int(refresh_entry.get())
-                 threadingTimer = Timer(num_refresh, run_app)
-                 threadingTimer.start()
              return
  except Exception as e:
      logging.error(f"[AGENDADO] Erro ao checar agendamento no início do run_app: {e}")
@@ -5774,9 +5779,7 @@ def run_app():
    file = "data.csv"
    dir_final = os.path.join(cwd,file)
     
-   root.update()
-
-   label_toolbarprocess.config(text=returndatetimeatual())
+   ui_safe(lambda: label_toolbarprocess.config(text=returndatetimeatual()))
    progresso["value"] = 0
 #    Exibe progressbar
    progresso.pack(side=RIGHT, padx=10, pady=5)
@@ -5974,12 +5977,6 @@ def run_app():
             gc.collect()
         except Exception:
             pass
-
-        # Rearma SOMENTE se estiver rodando
-        if button_update["text"] == "Running":
-            num_refresh = int(refresh_entry.get())
-            threadingTimer = Timer(num_refresh, run_app)
-            threadingTimer.start()
 
 def ui_safe(fn):
     try:
