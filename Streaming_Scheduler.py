@@ -6045,7 +6045,7 @@ def obter_eventos_dazn_completo(driver):
 
     resolve_banners_Dazn(driver)
  
-    while True:
+    for _ in range(25):
         # Coleta apenas os artigos da seção "A seguir"
         artigos = driver.find_elements(
             By.XPATH,
@@ -6079,22 +6079,15 @@ def obter_eventos_dazn_completo(driver):
 
         # Tenta clicar na seta ">"
         try:
-            
             seta_direita = driver.find_elements(By.XPATH, "//button[contains(@class, 'slick-next')]")
-            # seta_direita = WebDriverWait(driver, 2).until(
-                
-            #     # EC.element_to_be_clickable((By.XPATH, '//*[@id="hob-tab-content"]/div/section/section[3]/div/div[2]/button[2]'))
-            #      EC.element_to_be_clickable((By.XPATH,"button[@class='slick-arrow slick-next rail__rail-next-button___1E79l']"))
-            # )
-          
-            if len(seta_direita) > 0:
-                 ActionChains(driver).move_to_element(seta_direita[1]).click().perform()
+            if not seta_direita:
+                break
+            ActionChains(driver).move_to_element(seta_direita[0]).click().perform()
             time.sleep(3)
-            # classe_botao = seta_direita.get_attribute("class")
             classe_botao = driver.find_elements(By.XPATH, "//button[contains(@class, 'next') and contains(@class, 'disable')]")
             if len(classe_botao) > 0:
                 break            
-        except:
+        except Exception:
             break  # não há mais botão ou algo deu errado
 
     driver.set_window_size(orig_size['width'], orig_size['height'])
