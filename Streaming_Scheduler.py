@@ -2969,16 +2969,16 @@ def deep_normalize_match(match_name):
         t = str(t).lower()
         nfkd = unicodedata.normalize('NFD', t)
         t = "".join(c for c in nfkd if unicodedata.category(c) != 'Mn')
-        t = t.replace("-", " ").replace(".", " ").replace("_", " ")
+        t = t.replace("-", " ").replace(".", "").replace("_", " ")
         
         # 1. Limpeza de prefixos/sufixos e siglas institucionais
         prefixes = [
-            r"\besporte clube\b", r"\be c\b", r"\bf c\b", r"\bfutebol clube\b",
-            r"\bfc\b", r"\bec\b", r"\bsaf\b", r"\bclube de regatas\b",
+            r"\besporte clube\b", r"\be\s*c\b", r"\bf\s*c\b", r"\bfutebol clube\b",
+            r"\bfc\b", r"\bec\b", r"\bs\s*a\s*f\b", r"\bsaf\b", r"\bclube de regatas\b",
             r"\bsociedade esportiva\b", r"\bassociacao atletica\b",
             r"\bgremio recreativo\b", r"\bgremio esportivo\b",
             r"\bsport club\b", r"\bclube atletico\b", r"\bassociacao\b",
-            r"\bsc\b", r"\bse\b", r"\bcr\b", r"\bfr\b", r"\baf\b", r"\bca\b", r"\baa\b"
+            r"\bsc\b", r"\bse\b", r"\bc\s*r\b", r"\bcr\b", r"\bfr\b", r"\baf\b", r"\bca\b", r"\baa\b"
         ]
         for p in prefixes:
             t = re.sub(p, " ", t)
@@ -2987,7 +2987,7 @@ def deep_normalize_match(match_name):
         # 2. Mapeamento canônico exato de apelidos e variações dos clubes
         replacements = [
             # Vasco
-            (r"\b(vasco da gama|cr vasco da gama|vasco)\b", "vasco"),
+            (r"\b(vasco da gama|cr vasco da gama|c r vasco da gama|vasco)\b", "vasco"),
             # Athletico-PR
             (r"\b(athletico paranaense|atletico paranaense|athletico pr|atletico pr|cap|athletico)\b", "athletico pr"),
             # Atlético-MG
@@ -4137,14 +4137,8 @@ def run_eventos_prime(url_camp, expected_camp=""):
                         driverchrome1.close()
                         driverchrome1.switch_to.window(driverchrome1.window_handles[0])
 
-            # Campeonato (se necessário). O seu XPath antigo é frágil; tenta pegar o alt da imagem do card.
-            # Campeonato (direto no alt da imagem ou fallback)
-            try:
-                # Tenta pegar do alt da imagem do card
-                campeonato_img = card.find_element(By.CSS_SELECTOR, "img[alt]").get_attribute("alt").strip()
-                campeonato = campeonato_img if (campeonato_img and len(campeonato_img) > 3) else expected_camp
-            except Exception:
-                campeonato = expected_camp or ""
+            # Campeonato (usa o nome configurado do campeonato ou padrão)
+            campeonato = expected_camp if expected_camp else "Brasileirão serie A"
 
             # Normaliza data/hora
             data_str = (data_hora or "").title()
@@ -4652,7 +4646,7 @@ def run_eventos_disney(url_camp, expected_camp=None):
 
                          if len(all_text) > 2 and 'Transmitido' not in dt_time[0]:
                            event = all_text[1]
-                           champ = all_text[2].replace("Campeonato", "").strip() if len(all_text) > 2 else (expected_camp or "Disney")
+                           champ = expected_camp or (all_text[2].replace("Campeonato", "").strip() if len(all_text) > 2 else "Disney")
                            
                            # Tenta pegar o link da tag pai ou de links internos
                            links = h[n].find_elements(By.TAG_NAME, "a")

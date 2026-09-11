@@ -5,7 +5,7 @@ import re
 import time
 import logging
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Any, Tuple, Optional
 
 import requests
@@ -37,9 +37,12 @@ TUPLE_INDEX_TO_FIELD: Dict[int, str] = {
     7: "Url",
 }
 
-# Cache em memória para o Microsoft Graph
+# Cache em memória e IDs padrão para o Microsoft Graph
+DEFAULT_SITE_ID = "adgbl.sharepoint.com,a3e49747-9bb6-4c93-9930-dda26c8d1050,34c8fe55-2cfe-4efc-8ce0-2958fd775ee0"
+DEFAULT_LIST_ID = "f7e25960-cf15-4ed8-b88c-bf607dc90a0f"
+
 _GRAPH_TOKEN_CACHE: Dict[str, Any] = {"token": None, "expires_at": 0}
-_GRAPH_IDS_CACHE: Dict[str, str] = {"site_id": None, "list_id": None}
+_GRAPH_IDS_CACHE: Dict[str, str] = {"site_id": DEFAULT_SITE_ID, "list_id": DEFAULT_LIST_ID}
 
 
 def _normalizar_texto(txt: str) -> str:
@@ -61,7 +64,7 @@ def _normalizar_campeonato(camp: str) -> str:
 
 
 def _deep_normalize_partida(match_name: str) -> tuple:
-    """Normaliza nome da partida para tupla ordenada de times canônicos (ex: ('botafogo', 'palmeiras'))."""
+    """Normaliza nome da partida para tupla ordenada de times canônicos (ex: ('botafogo', 'vasco'))."""
     if not match_name:
         return ("",)
     
@@ -71,16 +74,16 @@ def _deep_normalize_partida(match_name: str) -> tuple:
         t = str(t).lower()
         nfkd = unicodedata.normalize("NFKD", t)
         t = "".join([c for c in nfkd if not unicodedata.combining(c)])
-        t = t.replace("-", " ").replace(".", " ").replace("_", " ")
+        t = t.replace("-", " ").replace(".", "").replace("_", " ")
 
         # 1. Limpeza de prefixos/sufixos e siglas institucionais
         prefixes = [
-            r"\besporte clube\b", r"\be c\b", r"\bf c\b", r"\bfutebol clube\b",
-            r"\bfc\b", r"\bec\b", r"\bsaf\b", r"\bclube de regatas\b",
+            r"\besporte clube\b", r"\be\s*c\b", r"\bf\s*c\b", r"\bfutebol clube\b",
+            r"\bfc\b", r"\bec\b", r"\bs\s*a\s*f\b", r"\bsaf\b", r"\bclube de regatas\b",
             r"\bsociedade esportiva\b", r"\bassociacao atletica\b",
             r"\bgremio recreativo\b", r"\bgremio esportivo\b",
             r"\bsport club\b", r"\bclube atletico\b", r"\bassociacao\b",
-            r"\bsc\b", r"\bse\b", r"\bcr\b", r"\bfr\b", r"\baf\b", r"\bca\b", r"\baa\b"
+            r"\bsc\b", r"\bse\b", r"\bc\s*r\b", r"\bcr\b", r"\bfr\b", r"\baf\b", r"\bca\b", r"\baa\b"
         ]
         for p in prefixes:
             t = re.sub(p, " ", t)
@@ -89,7 +92,7 @@ def _deep_normalize_partida(match_name: str) -> tuple:
         # 2. Mapeamento canônico exato de apelidos e variações dos clubes
         replacements = [
             # Vasco
-            (r"\b(vasco da gama|cr vasco da gama|vasco)\b", "vasco"),
+            (r"\b(vasco da gama|cr vasco da gama|c r vasco da gama|vasco)\b", "vasco"),
             # Athletico-PR
             (r"\b(athletico paranaense|atletico paranaense|athletico pr|atletico pr|cap|athletico)\b", "athletico pr"),
             # Atlético-MG
@@ -164,7 +167,7 @@ def _deep_normalize_partida(match_name: str) -> tuple:
             # Paysandu
             (r"\b(paysandu pa|paysandu|papao)\b", "paysandu"),
             # Remo
-            (r"\b(clube do remo|remo pa|remo|leao azul)\b", "remo"),
+            (r"\b(remo pa|remo|leao azul)\b", "remo"),
             # Avaí
             (r"\b(avai sc|avai|leao da ilha)\b", "avai"),
             # CRB / CSA
@@ -187,6 +190,23 @@ def _deep_normalize_partida(match_name: str) -> tuple:
     return (norm_team(match_name),)
 
 
+def _is_match_duplicate(p_tuple: tuple, d_short: str, existing_match_dates: set) -> bool:
+    """Verifica se o confronto já existe na mesma data ou com tolerância de +/- 1 dia."""
+    if not p_tuple or p_tuple == ("",) or not d_short:
+        return False
+    if (p_tuple, d_short) in existing_match_dates:
+        return True
+    try:
+        dt = datetime.strptime(d_short[:10], "%Y-%m-%d")
+        d_minus = (dt - timedelta(days=1)).strftime("%Y-%m-%d")
+        d_plus = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
+        if (p_tuple, d_minus) in existing_match_dates or (p_tuple, d_plus) in existing_match_dates:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _gerar_chave_evento(camp: str, part: str, data_iso: str, hora: str) -> str:
     """Gera chave composta única para o evento (evita duplicação no SharePoint)."""
     c_clean = _normalizar_campeonato(camp)
@@ -197,7 +217,6 @@ def _gerar_chave_evento(camp: str, part: str, data_iso: str, hora: str) -> str:
     d_clean = re.sub(r"[^0-9]", "", data_iso[:10]) if data_iso else ""
     h_clean = re.sub(r"[^0-9]", "", str(hora)) if hora else ""
     return f"{c_clean}_{p_clean}_{d_clean}_{h_clean}"
-
 
 
 def _mapear_canal(canal_raw: Any) -> List[str]:
@@ -259,7 +278,6 @@ def _obter_config_sharepoint() -> Dict[str, str]:
     except Exception:
         user = pwd = tenant = client_id = site_url = list_title = None
 
-    # Fallback para variáveis de ambiente locais se não encontradas
     user = user or os.getenv("SP_USERNAME", "svc.captacao@adgbl.com")
     pwd = pwd or os.getenv("SP_PASSWORD", "Acount@!2026")
     tenant = tenant or os.getenv("SP_TENANT_ID", "b2767241-fab5-454b-8b62-f6324650e316")
@@ -275,6 +293,42 @@ def _obter_config_sharepoint() -> Dict[str, str]:
         "site_url": site_url,
         "list_title": list_title,
     }
+
+
+def _graph_request(method: str, url: str, headers: Dict[str, str], json_payload: Any = None, max_retries: int = 5, timeout: int = 30) -> requests.Response:
+    """
+    Executa chamada HTTP à Graph API com tratamento inteligente de 429 (Rate Limit / Throttling)
+    e 503/504 com exponential backoff respeitando o header Retry-After.
+    """
+    attempt = 0
+    resp = None
+    while attempt < max_retries:
+        attempt += 1
+        try:
+            if method.upper() == "GET":
+                resp = requests.get(url, headers=headers, timeout=timeout)
+            elif method.upper() == "POST":
+                resp = requests.post(url, headers=headers, json=json_payload, timeout=timeout)
+            elif method.upper() == "PATCH":
+                resp = requests.patch(url, headers=headers, json=json_payload, timeout=timeout)
+            else:
+                resp = requests.request(method, url, headers=headers, json=json_payload, timeout=timeout)
+
+            if resp.status_code == 429 or resp.status_code in (503, 504):
+                retry_after = resp.headers.get("Retry-After")
+                wait_time = int(retry_after) if (retry_after and retry_after.isdigit()) else min(2 ** attempt + 1, 30)
+                logger.warning(f"[Graph API] Status {resp.status_code} (Throttling/Busy). Aguardando {wait_time}s antes de tentar novamente (tentativa {attempt}/{max_retries})...")
+                time.sleep(wait_time)
+                continue
+
+            return resp
+        except (requests.ConnectionError, requests.Timeout) as e:
+            wait_time = min(2 ** attempt + 1, 30)
+            logger.warning(f"[Graph API] Erro de conexão/timeout ({e}). Tentativa {attempt}/{max_retries}. Aguardando {wait_time}s...")
+            time.sleep(wait_time)
+            if attempt >= max_retries:
+                raise
+    return resp
 
 
 def _obter_token_graph() -> str:
@@ -310,45 +364,96 @@ def _obter_token_graph() -> str:
 def _obter_site_e_lista_ids(headers: Dict[str, str]) -> Tuple[str, str]:
     """Descobre e armazena em cache o site_id e list_id da lista de eventos."""
     global _GRAPH_IDS_CACHE
-    if _GRAPH_IDS_CACHE["site_id"] and _GRAPH_IDS_CACHE["list_id"]:
+    if _GRAPH_IDS_CACHE.get("site_id") and _GRAPH_IDS_CACHE.get("list_id"):
         return _GRAPH_IDS_CACHE["site_id"], _GRAPH_IDS_CACHE["list_id"]
 
     cfg = _obter_config_sharepoint()
-    # Extrai domínio e caminho relativo do site_url
     url_clean = cfg["site_url"].replace("https://", "").replace("http://", "").rstrip("/")
     partes = url_clean.split("/", 1)
     domain = partes[0]
     site_path = f"/{partes[1]}" if len(partes) > 1 else ""
 
-    # 1. Obter Site ID
-    r_site = requests.get(f"https://graph.microsoft.com/v1.0/sites/{domain}:{site_path}", headers=headers, timeout=30)
-    r_site.raise_for_status()
-    site_id = r_site.json()["id"]
+    try:
+        r_site = _graph_request("GET", f"https://graph.microsoft.com/v1.0/sites/{domain}:{site_path}", headers=headers, timeout=30)
+        r_site.raise_for_status()
+        site_id = r_site.json()["id"]
 
-    # 2. Obter List ID
-    r_lists = requests.get(f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists", headers=headers, timeout=30)
-    r_lists.raise_for_status()
-    list_id = None
-    for l in r_lists.json().get("value", []):
-        disp = l.get("displayName", "")
-        name = l.get("name", "")
-        if ("evento" in disp.lower() and "streaming" in disp.lower()) or name == "Programao de eventos  Streaming" or l.get("id") == "f7e25960-cf15-4ed8-b88c-bf607dc90a0f":
-            list_id = l.get("id")
+        r_lists = _graph_request("GET", f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists", headers=headers, timeout=30)
+        r_lists.raise_for_status()
+        list_id = None
+        for l in r_lists.json().get("value", []):
+            disp = l.get("displayName", "")
+            name = l.get("name", "")
+            if ("evento" in disp.lower() and "streaming" in disp.lower()) or name == "Programao de eventos  Streaming" or l.get("id") == DEFAULT_LIST_ID:
+                list_id = l.get("id")
+                break
+
+        if not list_id:
+            list_id = DEFAULT_LIST_ID
+
+        _GRAPH_IDS_CACHE["site_id"] = site_id
+        _GRAPH_IDS_CACHE["list_id"] = list_id
+        logger.info(f"[SharePoint Direct] Conectado ao Site ID: {site_id} | List ID: {list_id}")
+        return site_id, list_id
+    except Exception as e:
+        logger.warning(f"[SharePoint Direct] Falha ao resolver IDs dinamicamente: {e}. Usando IDs padrão.")
+        _GRAPH_IDS_CACHE["site_id"] = DEFAULT_SITE_ID
+        _GRAPH_IDS_CACHE["list_id"] = DEFAULT_LIST_ID
+        return DEFAULT_SITE_ID, DEFAULT_LIST_ID
+
+
+def _carregar_eventos_existentes(headers: Dict[str, str], site_id: str, list_id: str) -> Tuple[set, set, set]:
+    """Carrega os eventos existentes no SharePoint para desduplicação imediata."""
+    existing_chaves = set()
+    existing_tuples = set()
+    existing_match_dates = set()
+
+    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists/{list_id}/items?expand=fields&$top=100"
+    page_count = 0
+    max_pages = 10  # Indexa até 1000 itens recentes
+
+    logger.info("[SharePoint Direct] Consultando eventos existentes no SharePoint para desduplicação...")
+    while url and page_count < max_pages:
+        page_count += 1
+        try:
+            resp = _graph_request("GET", url, headers=headers, timeout=25)
+            if not resp or resp.status_code != 200:
+                logger.warning(f"[SharePoint Direct] Erro ao buscar itens página {page_count}: {resp.status_code if resp else 'No response'}")
+                break
+
+            data = resp.json()
+            items = data.get("value", [])
+            for item in items:
+                f = item.get("fields", {})
+                ch = f.get("ChaveEvento")
+                if ch:
+                    existing_chaves.add(str(ch).strip())
+
+                c_val = _normalizar_campeonato(f.get("Title"))
+                p_raw = f.get("Partida", "")
+                p_val = _normalizar_texto(p_raw)
+                p_tuple = _deep_normalize_partida(p_raw)
+                d_raw = str(f.get("Data", ""))[:10]
+                h_val = str(f.get("Hor_x00e1_rio", "")).strip()
+
+                if c_val and p_val and d_raw:
+                    existing_tuples.add((c_val, p_val, d_raw, h_val))
+                if p_tuple != ("",) and d_raw:
+                    existing_match_dates.add((p_tuple, d_raw))
+
+            url = data.get("@odata.nextLink")
+        except Exception as e:
+            logger.warning(f"[SharePoint Direct] Erro ao carregar página {page_count} de eventos: {e}")
             break
 
-    if not list_id:
-        raise ValueError(f"Lista de eventos '{cfg['list_title']}' não encontrada no site SharePoint.")
-
-    _GRAPH_IDS_CACHE["site_id"] = site_id
-    _GRAPH_IDS_CACHE["list_id"] = list_id
-    logger.info(f"[SharePoint Direct] Conectado ao Site ID: {site_id} | List ID: {list_id}")
-    return site_id, list_id
+    logger.info(f"[SharePoint Direct] Indexados: {len(existing_chaves)} chaves, {len(existing_match_dates)} confrontos existentes.")
+    return existing_chaves, existing_tuples, existing_match_dates
 
 
 def _post_to_sharepoint_direct(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Envia eventos diretamente para a lista do SharePoint via Microsoft Graph API.
-    Realiza verificação de duplicidade por ChaveEvento antes de inserir.
+    Realiza verificação rigorosa de duplicidade por ChaveEvento, Jogo+Data (+/- 1 dia) antes de inserir.
     """
     token = _obter_token_graph()
     headers = {
@@ -358,50 +463,13 @@ def _post_to_sharepoint_direct(events: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     site_id, list_id = _obter_site_e_lista_ids(headers)
 
-    # 1. Carrega eventos existentes no SharePoint para desduplicação (por período de datas dos eventos)
-    existing_chaves = set()
-    existing_tuples = set()
-    existing_match_dates = set()
-    try:
-        datas = [str(ev.get("Data", ""))[:10] for ev in events if ev.get("Data")]
-        if datas:
-            min_date = min(datas)
-            max_date = max(datas)
-            try:
-                min_dt = (datetime.strptime(min_date, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
-                max_dt = (datetime.strptime(max_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-            except Exception:
-                min_dt, max_dt = min_date, max_date
-            filter_str = f"fields/Data ge '{min_dt}T00:00:00Z' and fields/Data le '{max_dt}T23:59:59Z'"
-            url_query = f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists/{list_id}/items?expand=fields&$filter={filter_str}&$top=999"
-        else:
-            url_query = f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists/{list_id}/items?expand=fields&$top=500"
-
-        logger.info("[SharePoint Direct] Consultando eventos existentes para desduplicação...")
-        r_recent = requests.get(url_query, headers=headers, timeout=30)
-        if r_recent.status_code == 200:
-            for item in r_recent.json().get("value", []):
-                f = item.get("fields", {})
-                ch = f.get("ChaveEvento")
-                if ch:
-                    existing_chaves.add(str(ch).strip())
-                c_val = _normalizar_campeonato(f.get("Title"))
-                p_val = _normalizar_texto(f.get("Partida"))
-                p_tuple = _deep_normalize_partida(f.get("Partida"))
-                d_val = str(f.get("Data", ""))[:10]
-                h_val = str(f.get("Hor_x00e1_rio", "")).strip()
-                if c_val and p_val and d_val:
-                    existing_tuples.add((c_val, p_val, d_val, h_val))
-                if p_tuple != ("",) and d_val:
-                    existing_match_dates.add((p_tuple, d_val))
-    except Exception as e:
-        logger.warning("[SharePoint Direct] Não foi possível pré-carregar lista existente: %s. A validação de unicidade do SharePoint garantirá a desduplicação.", e)
+    existing_chaves, existing_tuples, existing_match_dates = _carregar_eventos_existentes(headers, site_id, list_id)
 
     inserted_count = 0
     skipped_count = 0
     errors = []
 
-    logger.info("[SharePoint Direct] Processando %d evento(s) para inserção direta...", len(events))
+    logger.info(f"[SharePoint Direct] Processando {len(events)} evento(s) para inserção direta...")
 
     for ev in events:
         try:
@@ -416,18 +484,26 @@ def _post_to_sharepoint_direct(events: List[Dict[str, Any]]) -> Dict[str, Any]:
                 continue
 
             # Data ISO para coluna dateOnly no SharePoint:
-            # Usa T12:00:00Z para garantir que no fuso UTC-3 (Brasil) a data permaneça exatamente no mesmo dia
             data_iso = f"{dt_raw[:10]}T12:00:00Z" if not "T" in dt_raw else (f"{dt_raw[:10]}T12:00:00Z" if "T00:00:00" in dt_raw else dt_raw)
             d_short = dt_raw[:10]
 
-            # Chave do evento
+            # Chave e Normalização Canônica
             chave = _gerar_chave_evento(camp, part, data_iso, hora)
             p_tuple = _deep_normalize_partida(part)
-
-            # Verifica se já existe na memória (por Chave, por Tuple ou por Jogo+Data)
             tuple_check = (_normalizar_campeonato(camp), _normalizar_texto(part), d_short, hora)
-            if chave in existing_chaves or tuple_check in existing_tuples or (p_tuple != ("",) and (p_tuple, d_short) in existing_match_dates):
-                logger.info("[SharePoint Direct] Jogo '%s' em %s já existe no SharePoint (duplicata evitada). Ignorado.", part, d_short)
+
+            # Verificação de duplicidade:
+            # 1. Chave exata
+            # 2. Tupla exata
+            # 3. Confronto idêntico na mesma data ou +/- 1 dia (independente de hora ou prefixo de campeonato)
+            is_dup = (
+                chave in existing_chaves or
+                tuple_check in existing_tuples or
+                _is_match_duplicate(p_tuple, d_short, existing_match_dates)
+            )
+
+            if is_dup:
+                logger.info(f"[SharePoint Direct] Jogo '{part}' ({d_short}) já existe no SharePoint (duplicata evitada). Ignorado.")
                 skipped_count += 1
                 continue
 
@@ -445,41 +521,42 @@ def _post_to_sharepoint_direct(events: List[Dict[str, Any]]) -> Dict[str, Any]:
                 }
             }
 
-            r_ins = requests.post(
+            r_ins = _graph_request(
+                "POST",
                 f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists/{list_id}/items",
                 headers=headers,
-                json=item_payload,
+                json_payload=item_payload,
                 timeout=30
             )
 
-            if r_ins.status_code in (200, 201):
+            if r_ins and r_ins.status_code in (200, 201):
                 inserted_count += 1
                 existing_chaves.add(chave)
                 existing_tuples.add(tuple_check)
                 if p_tuple != ("",):
                     existing_match_dates.add((p_tuple, d_short))
-            elif r_ins.status_code == 400 and ("unique" in r_ins.text.lower() or "already has the provided value" in r_ins.text.lower()):
+            elif r_ins and r_ins.status_code == 400 and ("unique" in r_ins.text.lower() or "already has the provided value" in r_ins.text.lower()):
                 # O SharePoint rejeitou com restrição de unicidade (item já existe no banco)
                 skipped_count += 1
                 existing_chaves.add(chave)
                 existing_tuples.add(tuple_check)
                 if p_tuple != ("",):
                     existing_match_dates.add((p_tuple, d_short))
-                logger.info("[SharePoint Direct] Evento '%s' já existia na lista. Ignorado com sucesso.", part)
+                logger.info(f"[SharePoint Direct] Evento '{part}' já existia na lista (restrição de unicidade). Ignorado com sucesso.")
             else:
-                err_msg = f"Erro {r_ins.status_code} ao inserir '{part}': {r_ins.text}"
-                logger.error("[SharePoint Direct] %s", err_msg)
+                err_code = r_ins.status_code if r_ins else "No Response"
+                err_text = r_ins.text if r_ins else ""
+                err_msg = f"Erro {err_code} ao inserir '{part}': {err_text}"
+                logger.error(f"[SharePoint Direct] {err_msg}")
                 errors.append(err_msg)
 
         except Exception as e:
             err_msg = f"Exceção ao inserir evento: {e}"
-            logger.error("[SharePoint Direct] %s", err_msg, exc_info=True)
+            logger.error(f"[SharePoint Direct] {err_msg}", exc_info=True)
             errors.append(err_msg)
 
-
     logger.info(
-        "[SharePoint Direct] Finalizado. Total: %d | Inseridos: %d | Ignorados (já existiam): %d | Erros: %d",
-        len(events), inserted_count, skipped_count, len(errors)
+        f"[SharePoint Direct] Finalizado. Total: {len(events)} | Inseridos: {inserted_count} | Ignorados (já existiam): {skipped_count} | Erros: {len(errors)}"
     )
 
     return {
@@ -526,7 +603,7 @@ def _tuple_to_item(row: Tuple[Any, ...]) -> Dict[str, Any]:
         item["Data"] = dt.strftime("%Y-%m-%d")
         item["Mês"] = MONTH_NAMES_PT[dt.month - 1]
     except Exception as e:
-        logger.warning("[SharePoint] Data inválida: %r (%s). Ignorando item.", data_str, e)
+        logger.warning(f"[SharePoint] Data inválida: {data_str!r} ({e}). Ignorando item.")
         return None
 
     # --- Horário ---
@@ -543,7 +620,6 @@ def _tuple_to_item(row: Tuple[Any, ...]) -> Dict[str, Any]:
 def _post_to_flow(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Fallback: envia os eventos para o fluxo legado do Power Automate."""
     from dotenv import load_dotenv
-    import json
 
     load_dotenv(override=False)
 
@@ -570,14 +646,14 @@ def _post_to_flow(events: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     payload = {"events": clean_events}
 
-    logger.info("[Flow Fallback] Enviando %d evento(s) para o Power Automate...", len(clean_events))
+    logger.info(f"[Flow Fallback] Enviando {len(clean_events)} evento(s) para o Power Automate...")
 
     resp = requests.post(flow_url, json=payload, timeout=120)
 
     try:
         resp.raise_for_status()
     except Exception as e:
-        logger.error("[Flow Fallback] Erro HTTP ao chamar o Flow (%s): %s", resp.status_code, e, exc_info=True)
+        logger.error(f"[Flow Fallback] Erro HTTP ao chamar o Flow ({resp.status_code}): {e}", exc_info=True)
         return {
             "total": len(clean_events),
             "inserted": 0,
@@ -598,8 +674,8 @@ def _post_to_flow(events: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     return {
         "total": len(clean_events),
-        "inserted": None,
-        "skipped_existing": None,
+        "inserted": len(clean_events),
+        "skipped_existing": 0,
         "errors": [],
         "status_code": resp.status_code,
         "source": "power_automate_fallback"
@@ -611,7 +687,7 @@ def _post_to_flow(events: List[Dict[str, Any]]) -> Dict[str, Any]:
 def push_events_to_sharepoint(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Tenta o envio direto via Microsoft Graph API (mais rápido e com desduplicação imediata).
-    Caso ocorra qualquer erro ou exceção, aciona automaticamente o Power Automate como Fallback.
+    Caso ocorra falha total de comunicação, aciona o Power Automate como Fallback.
     """
     if not items:
         logger.info("[SharePoint] Nenhum item recebido para envio.")
@@ -621,15 +697,16 @@ def push_events_to_sharepoint(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     try:
         logger.info("[SharePoint] Iniciando envio direto via Microsoft Graph API...")
         res = _post_to_sharepoint_direct(items)
-        # Se não houve erros fatais, retorna o resultado direto
-        if res and not (res.get("inserted") == 0 and res.get("skipped_existing") == 0 and res.get("errors")):
+        
+        # Se a chamada ao Graph API processou os itens (mesmo que alguns tenham sido inseridos e outros pulados por duplicidade)
+        # nós NÃO devemos acionar o fallback para não duplicar no Power Automate.
+        if res and (res.get("inserted", 0) > 0 or res.get("skipped_existing", 0) > 0 or not res.get("errors")):
             return res
         elif res and res.get("errors"):
-            logger.warning("[SharePoint] Gravação direta apresentou erros: %s. Acionando Fallback Power Automate...", res.get("errors"))
+            logger.warning(f"[SharePoint] Gravação direta falhou com erros: {res.get('errors')}. Acionando Fallback Power Automate...")
     except Exception as e:
         logger.warning(
-            "[SharePoint] Falha na comunicação direta via Graph API (%s). Acionando Fallback Power Automate...",
-            e,
+            f"[SharePoint] Falha na comunicação direta via Graph API ({e}). Acionando Fallback Power Automate...",
             exc_info=True
         )
 
