@@ -422,47 +422,84 @@ _COOLDOWN_MIN = 5  # minutos
 _eventos_iniciados = set()
 
 # Globais de UI (Combobox)
-options_plat = []
-checkbox_states_plat = {}
+options_plat = ["Amazon Prime", "Disney", "Cazé TV", "Dazn", "Max", "CBF"]
+checkbox_states_plat = {opt: False for opt in options_plat}
 combo_plat = None
 menu_plat = None
 checkbox_vars_plat = {}
 
-options_camp = []
-checkbox_states_camp = {}
+options_camp = ["Brasileirão serie A", "Brasileirão serie B", "Copa do Brasil", "Copa do Mundo", "Mundial de Clubes FIFA", "Campeonato Paulista", "CONMEBOL Libertadores", "CONMEBOL Sudamericana"]
+checkbox_states_camp = {opt: False for opt in options_camp}
 combo_camp = None
 menu_camp = None
 checkbox_vars_camp = {}
 
 def update_combobox_text_plat():
-    global options_plat, checkbox_states_plat, combo_plat
-    if 'options_plat' not in globals() or 'combo_plat' not in globals(): return
-    selected_options = [opt for opt in options_plat if checkbox_states_plat.get(opt)]
-    combo_plat.set(", ".join(selected_options) if selected_options else "Selecione...")
+    global options_plat, checkbox_states_plat, combo_plat, checkbox_vars_plat
+    if combo_plat is None:
+        return
+    selected_options = [
+        opt for opt in options_plat
+        if is_selected_plat(opt)
+    ]
+    combo_plat.set(", ".join(selected_options) if selected_options else "Selecione plataformas")
 
 def toggle_checkbox_plat(option, var):
-    global checkbox_states_plat
+    global checkbox_states_plat, checkbox_vars_plat
     checkbox_states_plat[option] = var.get()
+    checkbox_vars_plat[option] = var
     update_combobox_text_plat()
 
 def show_checkbox_menu_plat():
     global menu_plat, combo_plat
-    menu_plat.tk_popup(combo_plat.winfo_rootx(), combo_plat.winfo_rooty() + combo_plat.winfo_height())
+    if menu_plat and combo_plat:
+        menu_plat.tk_popup(combo_plat.winfo_rootx(), combo_plat.winfo_rooty() + combo_plat.winfo_height())
+
+def is_selected_plat(option):
+    var = checkbox_vars_plat.get(option)
+    if var is not None:
+        return bool(var.get())
+    return bool(checkbox_states_plat.get(option, False))
 
 def update_combobox_text_camp():
-    global options_camp, checkbox_states_camp, combo_camp
-    if 'options_camp' not in globals() or 'combo_camp' not in globals(): return
-    selected_options = [opt for opt in options_camp if checkbox_states_camp.get(opt)]
-    combo_camp.set(", ".join(selected_options) if selected_options else "Selecione...")
+    global options_camp, checkbox_states_camp, combo_camp, checkbox_vars_camp
+    if combo_camp is None:
+        return
+    selected_options = [
+        opt for opt in options_camp
+        if is_selected_camp(opt)
+    ]
+    combo_camp.set(", ".join(selected_options) if selected_options else "Selecione campeonatos")
 
 def toggle_checkbox_camp(option, var):
-    global checkbox_states_camp
+    global checkbox_states_camp, checkbox_vars_camp
     checkbox_states_camp[option] = var.get()
+    checkbox_vars_camp[option] = var
     update_combobox_text_camp()
 
 def show_checkbox_menu_camp():
     global menu_camp, combo_camp
-    menu_camp.tk_popup(combo_camp.winfo_rootx(), combo_camp.winfo_rooty() + combo_camp.winfo_height())
+    if menu_camp and combo_camp:
+        menu_camp.tk_popup(combo_camp.winfo_rootx(), combo_camp.winfo_rooty() + combo_camp.winfo_height())
+
+def is_selected_camp(option):
+    var = checkbox_vars_camp.get(option)
+    if var is not None:
+        return bool(var.get())
+    return bool(checkbox_states_camp.get(option, False))
+
+def ao_alterar_somente_relatorio(*args):
+    """Quando o modo 'somente relatório' está ativo, desabilita e fecha o navegador da direita (9224)."""
+    try:
+        if 'checkbox_busca' in globals() and checkbox_busca.get() == 1:
+            if 'button_chrome2' in globals() and button_chrome2:
+                button_chrome2.config(state=DISABLED)
+            fechar_chrome_por_porta("9224")
+        else:
+            if 'button_chrome2' in globals() and button_chrome2:
+                button_chrome2.config(state=NORMAL)
+    except Exception as e:
+        logging.warning(f"Erro em ao_alterar_somente_relatorio: {e}")
 
 class App:
 
@@ -743,7 +780,7 @@ class App:
 
         checkbox_busca = IntVar(value=0) 
         
-        checkbox_BuscaAUto=Checkbutton(tb1,variable=checkbox_busca)
+        checkbox_BuscaAUto=Checkbutton(tb1,variable=checkbox_busca, command=ao_alterar_somente_relatorio)
         checkbox_BuscaAUto["bg"] = "#f0f0f0"
         ft = tkFont.Font(family='Times',size=10)
         checkbox_BuscaAUto["font"] = 'Helvetica 8 bold'
@@ -2227,8 +2264,7 @@ def carrega_config_xml():
             ativo = _to_bool(dados.get(chave_xml))
             if nome_ui in checkbox_vars_plat:
                 checkbox_vars_plat[nome_ui].set(ativo)
-            if nome_ui in checkbox_states_plat:
-                checkbox_states_plat[nome_ui] = ativo
+            checkbox_states_plat[nome_ui] = ativo
 
         update_combobox_text_plat()
 
@@ -2240,29 +2276,15 @@ def carrega_config_xml():
             ativo_camp = _to_bool(val_str)
             if camp_name in checkbox_vars_camp:
                 checkbox_vars_camp[camp_name].set(ativo_camp)
-                checkbox_states_camp[camp_name] = ativo_camp
+            checkbox_states_camp[camp_name] = ativo_camp
         
         update_combobox_text_camp()
 
+        # Ajusta estado do navegador Direito conforme modo relatório
+        ao_alterar_somente_relatorio()
+
     except Exception as e:
         logging.exception(f"Erro ao carregar config.xml: {e}")
-
-def update_combobox_text_plat():
-    selecionadas = [
-        nome for nome, var in checkbox_vars_plat.items()
-        if var.get()
-    ]
-    if selecionadas:
-        combo_plat.set(", ".join(selecionadas))
-    else:
-        combo_plat.set("Selecione plataformas")
-
-def is_selected_camp(option):
-    return checkbox_states_camp.get(option, False)
-
-def is_selected_plat(option):
-    var = checkbox_vars_plat.get(option)
-    return var.get() if var else False
     
 def ler_arquivo_xml(nome_arquivo):
     try:
@@ -2290,15 +2312,14 @@ def ler_arquivo_xml(nome_arquivo):
         somente_relatorio = safe_find("somente_relatorio", "false")
         
         plataforma_dazn = safe_find("plataforma_dazn", "false")
-        plataforma_prime = safe_find("plataforma_prime", "false")
+        plataforma_prime = safe_find("plataforma_prime") or safe_find("plataforma_amazon_prime", "false")
         plataforma_disney = safe_find("plataforma_disney", "false")
         plataforma_max = safe_find("plataforma_max", "false")
-        plataforma_caze = safe_find("plataforma_caze", "false")
+        plataforma_caze = safe_find("plataforma_caze") or safe_find("plataforma_caze_tv", "false")
         plataforma_cbf = safe_find("plataforma_cbf", "false")
         
         # Campeonatos
         camp_configs = {}
-        options_camp = ["Brasileirão serie A", "Brasileirão serie B", "Copa do Brasil", "Copa do Mundo", "Mundial de Clubes FIFA", "Campeonato Paulista", "CONMEBOL Libertadores", "CONMEBOL Sudamericana"]
         for opt in options_camp:
             tag_name = "camp_" + opt.lower().replace(" ", "_").replace("ã", "a").replace("õ", "o")
             camp_configs[opt] = safe_find(tag_name, "true")
@@ -2326,13 +2347,10 @@ def ler_arquivo_xml(nome_arquivo):
             "camp_configs": camp_configs
         }
     except FileNotFoundError:
-
         text=f"Arquivo '{nome_arquivo}' não encontrado."
-        pass
         return None
     except ET.ParseError:
         text="Erro ao analisar o XML. Verifique o formato do arquivo."
-        pass
         return None
     except Exception as e: 
         logging.error(f"Erro ocorrido: {e}")
@@ -2362,14 +2380,26 @@ def criar_arquivo_xml(nome_arquivo, emails, refresh, hora_automatico, check_auto
     set_tag("check_automatico_Evento", check_automatico_Evento)
     set_tag("somente_relatorio", somente_relatorio)
 
-    # Plataformas (Força sincronização com checkbox_vars_plat)
-    for plat in ["Dazn", "Amazon Prime", "Cazé TV", "Disney", "Max", "CBF"]:
-        chave = "plataforma_" + plat.lower().replace(" ", "_").replace("cazé", "caze")
+    # Plataformas (Mapeamento exato)
+    mapa_plataformas = [
+        ("Amazon Prime", "plataforma_prime"),
+        ("Disney", "plataforma_disney"),
+        ("Cazé TV", "plataforma_caze"),
+        ("Dazn", "plataforma_dazn"),
+        ("Max", "plataforma_max"),
+        ("CBF", "plataforma_cbf"),
+    ]
+    for plat, chave in mapa_plataformas:
         val = "true" if is_selected_plat(plat) else "false"
         set_tag(chave, val)
 
+    # Limpeza de tags legadas com grafia duplicada
+    for chave_legada in ["plataforma_amazon_prime", "plataforma_caze_tv"]:
+        el = root.find(chave_legada)
+        if el is not None:
+            root.remove(el)
+
     # Campeonatos
-    options_camp = ["Brasileirão serie A", "Brasileirão serie B", "Copa do Brasil", "Copa do Mundo", "Mundial de Clubes FIFA", "Campeonato Paulista", "CONMEBOL Libertadores", "CONMEBOL Sudamericana"]
     for opt in options_camp:
         tag_name = "camp_" + opt.lower().replace(" ", "_").replace("ã", "a").replace("õ", "o")
         val = "true" if is_selected_camp(opt) else "false"
@@ -2924,6 +2954,12 @@ def verificar_chrome_debug(porta_debug: str) -> bool:
     if devtools_ok(porta):
         set_label(f"Chrome já em depuração na porta {porta}.")
         return True
+
+    # Modo 'somente relatório': navegador da direita (9224) nunca deve ser aberto
+    if porta == 9224 and 'checkbox_busca' in globals() and checkbox_busca.get() == 1:
+        logging.info("[RELATORIO] Modo 'somente relatório' ativo. Navegador da direita (9224) desativado.")
+        set_label("Modo 'somente relatório' usa apenas o navegador Esquerdo (9222).")
+        return False
 
     # 2) não está pronto -> abrir e aguardar
     set_label(f"Iniciando Chrome em depuração na porta {porta}…")
@@ -4751,7 +4787,10 @@ def habilita_botoes():
     button_atualizacao.config(state=NORMAL)
     button_chrome1.config(state=NORMAL)
     button_add.config(state=NORMAL)
-    button_chrome2.config(state=NORMAL)
+    if 'checkbox_busca' in globals() and checkbox_busca.get() == 1:
+        button_chrome2.config(state=DISABLED)
+    else:
+        button_chrome2.config(state=NORMAL)
     button_delete.config(state=NORMAL)
   
 def run_busca_eventos(ignorar_trava=False):
@@ -5452,6 +5491,9 @@ def update_chrome1():
 
 def update_chrome2():
     # 9224
+    if 'checkbox_busca' in globals() and checkbox_busca.get() == 1:
+        logging.info("[RELATORIO] Modo 'somente relatório' ativo. Não iniciando Chrome 9224.")
+        return
     try:
        
         cwd = os.path.realpath('.')
