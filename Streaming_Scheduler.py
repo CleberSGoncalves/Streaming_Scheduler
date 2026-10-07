@@ -418,6 +418,7 @@ thread_em_execucao = False
 _lock_envio_email = threading.Lock()
 _ultimo_hash_enviado = None
 _ultima_janela_envio = datetime.min
+_ultimo_agendamento_data = None
 _COOLDOWN_MIN = 5  # minutos
 _eventos_iniciados = set()
 
@@ -2411,12 +2412,20 @@ def criar_arquivo_xml(nome_arquivo, emails, refresh, hora_automatico, check_auto
 
 def validar_hora_minuto(texto):
     """ Verifica se o texto inserido está no formato HH:MM """
-    global _ultima_janela_envio
+    global _ultima_janela_envio, _ultimo_agendamento_data
     padrao = r"^(?:[01]\d|2[0-3]):[0-5]\d$"  # Permite 00:00 a 23:59
     if re.match(padrao, texto):
         entry_email2.config(bg="lightgreen")  # Verde se for válido
-        # Se o usuário alterou o horário, resetamos a última janela para permitir teste imediato
-        _ultima_janela_envio = datetime.min
+        try:
+            h, m = map(int, texto.split(":"))
+            agora = datetime.now()
+            alvo = agora.replace(hour=h, minute=m, second=0, microsecond=0)
+            if agora < alvo:
+                _ultimo_agendamento_data = (agora - timedelta(days=1)).date()
+            else:
+                _ultimo_agendamento_data = agora.date()
+        except Exception:
+            pass
     else:
         entry_email2.config(bg="lightcoral")  # Vermelho se for inválido
 
@@ -2424,11 +2433,13 @@ def validar_hora_minuto(texto):
 
 
 def tarefa_diaria():
-    global thread_em_execucao
+    global thread_em_execucao, _ultimo_agendamento_data, _ultima_janela_envio
     if thread_em_execucao:
         logging.info("[INFO] Já está em execução. Ignorado.")
         return
     thread_em_execucao = True
+    _ultimo_agendamento_data = datetime.now().date()
+    _ultima_janela_envio = datetime.now()
     try:
         
         # =====================================================
@@ -5827,17 +5838,32 @@ def run_app():
  global monitoramento_ativo 
 
  # 1. Verificação segura do Agendamento Diário (sem travas ou conflitos)
+ global _ultimo_agendamento_data, _ultima_janela_envio
  try:
      agora = datetime.now()
      hora_cfg = entry_email2.get().strip()
-     if checkbox_grid.get() and checkbox_ema.get() and ":" in hora_cfg:
-         h, m = map(int, hora_cfg.split(":"))
-         alvo = agora.replace(hour=h, minute=m, second=0, microsecond=0)
-         
-         if agora >= alvo and _ultima_janela_envio.date() != agora.date():
-             logging.info(f"[AGENDADO] Horário atingido ({hora_cfg}). Executando tarefa_diaria em segundo plano...")
-             threading.Thread(target=tarefa_diaria).start()
-             return
+     if (checkbox_grid.get() or checkbox_ema.get()) and ":" in hora_cfg:
+         try:
+             h, m = map(int, hora_cfg.split(":"))
+             alvo_hoje = agora.replace(hour=h, minute=m, second=0, microsecond=0)
+             
+             # Se o app acabou de iniciar e o horário de hoje já passou, não dispara retroativamente
+             if _ultimo_agendamento_data is None:
+                 if agora > alvo_hoje:
+                     _ultimo_agendamento_data = agora.date()
+                     logging.info(f"[AGENDADO] Horário configurado ({hora_cfg}) já passou hoje. Próxima execução programada para amanhã às {hora_cfg}.")
+                 else:
+                     _ultimo_agendamento_data = (agora - timedelta(days=1)).date()
+
+             # Dispara se o horário foi atingido e ainda não foi executado hoje
+             if agora >= alvo_hoje and _ultimo_agendamento_data != agora.date():
+                 logging.info(f"[AGENDADO] Horário atingido ({hora_cfg}). Executando tarefa_diaria em segundo plano...")
+                 _ultimo_agendamento_data = agora.date()
+                 _ultima_janela_envio = agora
+                 threading.Thread(target=tarefa_diaria).start()
+                 return
+         except ValueError:
+             pass
  except Exception as e:
      logging.error(f"[AGENDADO] Erro ao checar agendamento no início do run_app: {e}")
 
