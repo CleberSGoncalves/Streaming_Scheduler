@@ -1954,10 +1954,18 @@ import re
 import unicodedata
 
 SEP_RE = re.compile(r"\s*(?:\||-|–|—|·|•|/|\[|\]|\(|\))\s*")
-BRASILEIRAO_RE = re.compile(r"brasileir[aã]o\s*(\d{4})", re.I)
-COPA_MUNDO_RE = re.compile(r"copa do mundo\s*(fifa)?\s*(\d{4})", re.I)
+BRASILEIRAO_RE = re.compile(r"brasileir[aã]o\s*(\d{4})?", re.I)
+COPA_MUNDO_RE = re.compile(r"copa do mundo\s*(fifa)?\s*(\d{4})?", re.I)
 RODADA_RE = re.compile(r"(\d{1,2})\s*(?:ª|a)?\s*rodad[ao]\b", re.I)
 PAULISTA_RE = re.compile(r"(campeonato\s+paulista|paulist[aã]o)\s*(\d{4})?", re.I)
+
+YOUTUBE_PROGRAM_BLACKLIST = [
+    'roda de bobo', 'pos-jogo', 'pós-jogo', 'pos jogo', 'pós jogo',
+    'pre-jogo', 'pré-jogo', 'pre jogo', 'pré jogo',
+    'resenha', 'react', 'podcast', 'bastidores', 'coletiva', 'debate',
+    'mesa redonda', 'aquecimento', 'zona mista', 'melhores momentos',
+    'highlights', 'compacto', 'gols da rodada', 'entrevista', 'sem imagens', 'sem imagem'
+]
 
 def norm(txt: str) -> str:
     if not txt:
@@ -1969,18 +1977,68 @@ def norm(txt: str) -> str:
     t = re.sub(r"\s+", " ", t)
     return t
 
+def limpar_time_yt(t: str) -> str:
+    if not t:
+        return ""
+    t = re.sub(r'[\(\[\{].*?[\)\]\}]', '', t)
+    noise = [
+        r'\bao vivo\b', r'\bcom imagens\b', r'\bcom imagem\b',
+        r'\btransmissao ao vivo\b', r'\btransmissao\b', r'\btransmissão\b',
+        r'\bhd\b', r'\b4k\b', r'\b1080p\b', r'\bexclusivo\b', r'\bdireto\b', r'\bfull hd\b'
+    ]
+    for n in noise:
+        t = re.sub(n, ' ', t, flags=re.IGNORECASE)
+    t = re.sub(r'[^\w\s\-\.]', ' ', t)
+    return re.sub(r'\s+', ' ', t).strip()
+
+def extrair_partida_youtube(titulo_full: str):
+    """
+    Extrai o confronto 'Time A x Time B' do título do YouTube.
+    Retorna None se for programa de debate/estúdio, pós-jogo, pré-jogo, react, resenha, etc.
+    """
+    if not titulo_full:
+        return None
+    t_lower = titulo_full.lower()
+    for b in YOUTUBE_PROGRAM_BLACKLIST:
+        if b in t_lower:
+            return None
+
+    # Divide por pipes e travessões
+    partes = re.split(r'[|–—]', titulo_full)
+    for p in partes:
+        p_clean = re.sub(r'^(?:ao vivo(?:\s*com\s*imagens)?|com imagens|transmissao ao vivo)[:\s-]*', '', p.strip(), flags=re.IGNORECASE).strip()
+        if re.search(r'\s+[xXvV]\s+|\s+vs\s+|\s+contra\s+', p_clean):
+            subparts = re.split(r'\s+[xXvV]\s+|\s+vs\s+|\s+contra\s+', p_clean, maxsplit=1)
+            if len(subparts) == 2:
+                t1 = limpar_time_yt(subparts[0])
+                t2 = limpar_time_yt(subparts[1])
+                if len(t1) >= 2 and len(t2) >= 2:
+                    return prettify_match_name(f'{t1} x {t2}')
+    return None
+
 def parse_youtube_title(raw_title: str, raw_desc: str = ""):
     """
-    Analisa título/descrição do YouTube e identifica:
-    - Brasileirão
-    - Copa do Mundo FIFA
-    - Campeonato Paulista
-    - Ano
-    - Rodada (SEPARADA, não entra no nome do campeonato)
+    Analisa título/descrição do YouTube e identifica campeonato, ano e rodada.
     """
-
     t = norm(raw_title)
     d = norm(raw_desc)
+
+    # Se o título contém blacklist de programas, não considera
+    for b in YOUTUBE_PROGRAM_BLACKLIST:
+        if b in t:
+            return {
+                "is_brasileirao": False,
+                "is_copa_mundo": False,
+                "is_paulista": False,
+                "is_libertadores": False,
+                "is_sudamericana": False,
+                "is_copa_brasil": False,
+                "is_carioca": False,
+                "is_bundesliga": False,
+                "year": None,
+                "rodada": None
+            }
+
     tokens = SEP_RE.split(t) + [t]
 
     year = None
@@ -1989,6 +2047,11 @@ def parse_youtube_title(raw_title: str, raw_desc: str = ""):
     is_brasileirao = False
     is_copa_mundo = False
     is_paulista = False
+    is_libertadores = False
+    is_sudamericana = False
+    is_copa_brasil = False
+    is_carioca = False
+    is_bundesliga = False
 
     # =========================
     # BRASILEIRÃO
@@ -1997,7 +2060,7 @@ def parse_youtube_title(raw_title: str, raw_desc: str = ""):
         m = BRASILEIRAO_RE.search(tok)
         if m:
             is_brasileirao = True
-            year = m.group(1)
+            year = m.group(1) if m.lastindex else "2026"
             break
 
     # =========================
@@ -2008,19 +2071,41 @@ def parse_youtube_title(raw_title: str, raw_desc: str = ""):
             m = COPA_MUNDO_RE.search(tok)
             if m:
                 is_copa_mundo = True
-                year = m.group(2)
+                year = m.group(2) if m.lastindex >= 2 else "2026"
                 break
 
     # =========================
     # PAULISTÃO
     # =========================
-    for tok in tokens:
-        m = PAULISTA_RE.search(tok)
-        if m:
-            is_paulista = True
-            if m.lastindex and m.group(2):
-                year = m.group(2)
-            break
+    if not (is_brasileirao or is_copa_mundo):
+        for tok in tokens:
+            m = PAULISTA_RE.search(tok)
+            if m:
+                is_paulista = True
+                if m.lastindex and m.group(2):
+                    year = m.group(2)
+                break
+
+    # =========================
+    # LIBERTADORES / SUDAMERICANA / COPA DO BRASIL / CARIOCA / BUNDESLIGA
+    # =========================
+    if not (is_brasileirao or is_copa_mundo or is_paulista):
+        for tok in tokens:
+            if re.search(r"libertadores", tok, re.I):
+                is_libertadores = True
+                break
+            elif re.search(r"sudamericana|sul[- ]americana", tok, re.I):
+                is_sudamericana = True
+                break
+            elif re.search(r"copa do brasil", tok, re.I):
+                is_copa_brasil = True
+                break
+            elif re.search(r"carioca|carioc[aã]o", tok, re.I):
+                is_carioca = True
+                break
+            elif re.search(r"bundesliga", tok, re.I):
+                is_bundesliga = True
+                break
 
     # =========================
     # RODADA
@@ -2044,20 +2129,29 @@ def parse_youtube_title(raw_title: str, raw_desc: str = ""):
             m = BRASILEIRAO_RE.search(d)
             if m:
                 is_brasileirao = True
-                year = m.group(1)
+                year = m.group(1) if m.lastindex else "2026"
 
-        if not is_copa_mundo:
+        if not is_copa_mundo and not is_brasileirao:
             m = COPA_MUNDO_RE.search(d)
             if m:
                 is_copa_mundo = True
-                year = m.group(2)
+                year = m.group(2) if m.lastindex >= 2 else "2026"
 
-        if not is_paulista:
+        if not is_paulista and not is_brasileirao and not is_copa_mundo:
             m = PAULISTA_RE.search(d)
             if m:
                 is_paulista = True
                 if m.lastindex and m.group(2):
                     year = m.group(2)
+
+        if not is_libertadores and re.search(r"libertadores", d, re.I):
+            is_libertadores = True
+
+        if not is_sudamericana and re.search(r"sudamericana|sul[- ]americana", d, re.I):
+            is_sudamericana = True
+
+        if not is_copa_brasil and re.search(r"copa do brasil", d, re.I):
+            is_copa_brasil = True
 
         if rodada is None:
             r = RODADA_RE.search(d)
@@ -2068,6 +2162,11 @@ def parse_youtube_title(raw_title: str, raw_desc: str = ""):
         "is_brasileirao": is_brasileirao,
         "is_copa_mundo": is_copa_mundo,
         "is_paulista": is_paulista,
+        "is_libertadores": is_libertadores,
+        "is_sudamericana": is_sudamericana,
+        "is_copa_brasil": is_copa_brasil,
+        "is_carioca": is_carioca,
+        "is_bundesliga": is_bundesliga,
         "year": year,
         "rodada": rodada
     }
@@ -2076,13 +2175,12 @@ def normalizar_titulo_evento(txt: str) -> str:
     if not txt:
         return ""
     txt = txt.strip().lower()
-    # capitaliza cada palavra
     return " ".join(p.capitalize() for p in txt.split())
 
-def obter_eventos_futuros(canal_url):
+def obter_eventos_futuros(canal_url, expected_camp=None):
     """
     Retorna lista de tuplas: [(champ, titulo, url, dd/mm/YYYY, HH:MM)]
-    Só considera lives/vídeos futuros do Brasileirão 2025.
+    Filtra estritamente confrontos ao vivo válidos, descartando programas/debates/resenhas.
     """
     from datetime import datetime, timezone
     import yt_dlp, logging
@@ -2129,43 +2227,40 @@ def obter_eventos_futuros(canal_url):
             except Exception:
                 continue
 
-            # Título "limpo"
+            # Título e validação rigorosa de confronto (exclui programas pós/pré-jogo, roda de bobo, react, resenha)
             titulo_full = (vinfo.get('title') or entry.get('title') or '').strip()
-            titulo_raw = titulo_full.replace('AO VIVO: ', '').split('|')[0].strip()
-            titulo = normalizar_titulo_evento(titulo_raw)
+            partida_extraida = extrair_partida_youtube(titulo_full)
+            if not partida_extraida:
+                logging.info(f"[YouTube/Cazé] Ignorando '{titulo_full}' (não é transmissão de jogo / programa de debate ou pós-jogo).")
+                continue
 
-            # ======= Detecção Brasileirão/rodada (usando título + descrição do vinfo) =======
+            titulo = partida_extraida
+
+            # ======= Detecção do campeonato =======
             descricao = (vinfo.get('description') or '').strip()
             info_champ = parse_youtube_title(titulo_full, descricao)
 
-            # =========================
-            # FILTRO DE CAMPEONATO
-            # =========================
-            if not (
-                (info_champ.get("is_brasileirao") and info_champ.get("year") == "2026") or
-                info_champ.get("is_copa_mundo") or
-                (info_champ.get("is_paulista") and info_champ.get("year") == "2026")
-            ):
-                continue
-            # =========================
-            # NOME DO CAMPEONATO
-            # =========================
-            if info_champ.get("is_copa_mundo"):
-                champ = (
-                    f'COPA DO MUNDO FIFA {info_champ["year"]}'
-                    if info_champ.get("year")
-                    else 'COPA DO MUNDO FIFA'
-                )
-
+            if expected_camp:
+                champ = expected_camp
+            elif info_champ.get("is_copa_mundo"):
+                champ = f'COPA DO MUNDO FIFA {info_champ["year"]}' if info_champ.get("year") else 'COPA DO MUNDO FIFA'
             elif info_champ.get("is_paulista"):
-                champ = (
-                    f'PAULISTÃO {info_champ["year"]}'
-                    if info_champ.get("year")
-                    else 'PAULISTÃO'
-                )
-
+                champ = f'PAULISTÃO {info_champ["year"]}' if info_champ.get("year") else 'PAULISTÃO'
+            elif info_champ.get("is_libertadores"):
+                champ = 'CONMEBOL Libertadores'
+            elif info_champ.get("is_sudamericana"):
+                champ = 'CONMEBOL Sudamericana'
+            elif info_champ.get("is_copa_brasil"):
+                champ = 'Copa do Brasil'
+            elif info_champ.get("is_carioca"):
+                champ = 'Campeonato Carioca'
+            elif info_champ.get("is_bundesliga"):
+                champ = 'Bundesliga'
+            elif info_champ.get("is_brasileirao"):
+                champ = f'BRASILEIRAO {info_champ["year"]}' if info_champ.get("year") else 'BRASILEIRAO'
             else:
-                champ = f'BRASILEIRAO {info_champ["year"]}'
+                logging.info(f"[YouTube/Cazé] Campeonato não identificado para '{titulo_full}'. Ignorando.")
+                continue
 
             # ======= Timestamp (UTC) -> local =======
             ts = (vinfo.get('scheduled_start_time') or
@@ -2204,9 +2299,6 @@ def obter_eventos_futuros(canal_url):
                 dt_local.strftime('%d/%m/%Y'),
                 dt_local.strftime('%H:%M')
             ))
-
-        # opcional: ordenar por data/hora
-        # eventos_futuros.sort(key=lambda x: (x[3], x[4]))
 
         return eventos_futuros
 
@@ -4987,7 +5079,7 @@ def run_busca_eventos(ignorar_trava=False):
                 if plat == "Cazé TV":
                     # Cazé TV: busca via obter_eventos_futuros e filtra pelo nome
                     try:
-                        eventos_caze = obter_eventos_futuros(url_camp)
+                        eventos_caze = obter_eventos_futuros(url_camp, expected_camp=nome_camp)
                         var_nav_ext = "Esquerda"
                         for champ_c, titulo_c, url_c, data_c, horario_c in (eventos_caze or []):
                             row_ext = (nome_camp, prettify_match_name(titulo_c), data_c, horario_c, var_nav_ext, 15, "Cazé TV", url_c)

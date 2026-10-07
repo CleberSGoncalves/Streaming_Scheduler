@@ -22,6 +22,7 @@ auth.xml.*
 config.xml
 config.xml.*
 secret.key
+sp_token_cache.json
 *.log
 *.csv
 *.db
