@@ -2994,7 +2994,7 @@ def verificar_chrome_debug(porta_debug: str) -> bool:
 def deep_normalize_match(match_name):
     """
     Normaliza nomes de jogos de forma profunda para detectar duplicatas como
-    'Vasco x São Paulo' vs 'Vasco da Gama x São Paulo FC'.
+    'Vasco x São Paulo' vs 'Vasco da Gama x São Paulo FC' ou 'Atlético' vs 'Atlético-MG'.
     Suporta variações de acentos, sufixos (E.C, F.C, S.A.F), siglas e nomes curtos/longos.
     """
     import unicodedata
@@ -3020,90 +3020,107 @@ def deep_normalize_match(match_name):
             t = re.sub(p, " ", t)
         t = re.sub(r"\s+", " ", t).strip()
 
+        # Limpeza prévia de siglas de estado no final para clubes de cidade única
+        state_strip_exceptions = ["atletico", "athletico", "america", "botafogo", "operario"]
+        if not any(exc in t for exc in state_strip_exceptions):
+            t = re.sub(r"\s+(mg|sp|rj|rs|pr|sc|ba|go|mt|ce|pe|al|rn|pb|am|pa|se|df|es|ma|pi|to|ro|ac|ap|rr)$", "", t).strip()
+
         # 2. Mapeamento canônico exato de apelidos e variações dos clubes
         replacements = [
             # Vasco
-            (r"\b(vasco da gama|cr vasco da gama|c r vasco da gama|vasco)\b", "vasco"),
+            (r"\b(vasco da gama|cr vasco da gama|c r vasco da gama|vasco|vascao)\b", "vasco"),
             # Athletico-PR
-            (r"\b(athletico paranaense|atletico paranaense|athletico pr|atletico pr|cap|athletico)\b", "athletico pr"),
-            # Atlético-MG
-            (r"\b(atletico mineiro|atletico mg|cam|galo)\b", "atletico mg"),
+            (r"\b(athletico paranaense|atletico paranaense|athletico pr|atletico pr|cap|athletico|furacao)\b", "athletico pr"),
             # Atlético-GO
             (r"\b(atletico goianiense|atletico go|acg|dragao)\b", "atletico go"),
+            # Atlético-MG (qualquer 'atletico' isolado no Brasileirão/Copa do Brasil mapeia para atletico mg)
+            (r"\b(atletico mineiro|atletico mg|cam|galo|atletico)\b", "atletico mg"),
             # Bragantino
-            (r"\b(red bull bragantino|rb bragantino|bragantino|massa bruta)\b", "bragantino"),
+            (r"\b(red bull bragantino|rb bragantino|bragantino sp|bragantino|massa bruta)\b", "bragantino"),
             # Corinthians
-            (r"\b(corinthians paulista|corinthians|sccp|timao)\b", "corinthians"),
+            (r"\b(corinthians paulista|corinthians sp|corinthians|sccp|timao)\b", "corinthians"),
             # São Paulo
-            (r"\b(sao paulo|spfc)\b", "sao paulo"),
+            (r"\b(sao paulo fc|sao paulo sp|sao paulo|spfc|tricolor paulista)\b", "sao paulo"),
             # Palmeiras
-            (r"\b(palmeiras|verdao)\b", "palmeiras"),
+            (r"\b(se palmeiras|palmeiras sp|palmeiras|verdao|alviverde)\b", "palmeiras"),
             # Flamengo
-            (r"\b(flamengo rj|flamengo|mengao|fla)\b", "flamengo"),
+            (r"\b(flamengo rj|cr flamengo|flamengo|mengao|fla|mengo)\b", "flamengo"),
             # Fluminense
-            (r"\b(fluminense rj|fluminense|flu)\b", "fluminense"),
+            (r"\b(fluminense rj|fluminense fc|fluminense|flu|tricolor carioca|tricolor das laranjeiras)\b", "fluminense"),
+            # Santos
+            (r"\b(santos fc|santos sp|santos|peixe)\b", "santos"),
             # Botafogo-SP vs Botafogo-RJ
             (r"\b(botafogo de ribeirao preto|botafogo sp)\b", "botafogo sp"),
+            (r"\b(botafogo pb|botafogo da paraiba)\b", "botafogo pb"),
             (r"\b(botafogo fr|botafogo rj|botafogo|fogao|bota)\b", "botafogo"),
             # Novorizontino (antes de Grêmio)
-            (r"\b(gremio novorizontino|novorizontino sp|novorizontino)\b", "novorizontino"),
+            (r"\b(gremio novorizontino|novorizontino sp|novorizontino|tigre do vale)\b", "novorizontino"),
             # Grêmio
-            (r"\b(gremio fbpa|gremio porto alegrense|gremio rsg|gremio)\b", "gremio"),
+            (r"\b(gremio fbpa|gremio porto alegrense|gremio rsg|gremio rs|gremio)\b", "gremio"),
             # Inter de Limeira vs Internacional
             (r"\b(internacional de limeira|inter de limeira|inter limeira)\b", "inter limeira"),
-            (r"\b(internacional rs|inter de porto alegre|inter rs|internacional|inter)\b", "internacional"),
+            (r"\b(internacional rs|inter de porto alegre|inter rs|internacional|inter|colorado)\b", "internacional"),
             # Cruzeiro
-            (r"\b(cruzeiro mg|cruzeiro)\b", "cruzeiro"),
+            (r"\b(cruzeiro ec|cruzeiro mg|cruzeiro|raposa)\b", "cruzeiro"),
             # Juventude
-            (r"\b(juventude rs|juventude)\b", "juventude"),
+            (r"\b(juventude rs|juventude|papo)\b", "juventude"),
             # Fortaleza
-            (r"\b(fortaleza ce|fortaleza)\b", "fortaleza"),
+            (r"\b(fortaleza ec|fortaleza ce|fortaleza|leao do pici)\b", "fortaleza"),
             # Ceará
-            (r"\b(ceara ce|ceara|vozao)\b", "ceara"),
+            (r"\b(ceara sc|ceara ce|ceara|vozao|vovo)\b", "ceara"),
             # Bahia
-            (r"\b(bahia ba|bahia|esquadrao)\b", "bahia"),
+            (r"\b(bahia ba|ec bahia|bahia|esquadrao|tricolor de aco)\b", "bahia"),
             # Vitória
-            (r"\b(vitoria ba|vitoria|leao da barra)\b", "vitoria"),
+            (r"\b(vitoria ba|ec vitoria|vitoria|leao da barra)\b", "vitoria"),
             # Cuiabá
-            (r"\b(cuiaba mt|cuiaba|dourado)\b", "cuiaba"),
+            (r"\b(cuiaba ec|cuiaba mt|cuiaba|dourado)\b", "cuiaba"),
             # Criciúma
-            (r"\b(criciuma sc|criciuma|tigre)\b", "criciuma"),
+            (r"\b(criciuma ec|criciuma sc|criciuma|tigre)\b", "criciuma"),
             # Coritiba
             (r"\b(coritiba fcf|coritiba pr|coritiba|coxa)\b", "coritiba"),
             # Goiás
-            (r"\b(goias go|goias|esmeraldino)\b", "goias"),
+            (r"\b(goias ec|goias go|goias|esmeraldino)\b", "goias"),
             # Sport
             (r"\b(sport club do recife|sport recife|sport pe|sport|leao da ilha)\b", "sport"),
             # América-MG vs América-RN
             (r"\b(america de natal|america rn)\b", "america rn"),
-            (r"\b(america mineiro|america mg|coelho)\b", "america mg"),
+            (r"\b(america mineiro|america mg|coelho|america)\b", "america mg"),
             # Chapecoense
             (r"\b(chapecoense af|chapecoense sc|chapecoense|chape)\b", "chapecoense"),
             # Mirassol
-            (r"\b(mirassol sp|mirassol)\b", "mirassol"),
+            (r"\b(mirassol fc|mirassol sp|mirassol|leaozinho)\b", "mirassol"),
             # Operário-PR
-            (r"\b(operario ferroviario|operario pr|operario)\b", "operario pr"),
+            (r"\b(operario ferroviario|operario pr|operario|fantasma)\b", "operario pr"),
             # Vila Nova
-            (r"\b(vila nova go|vila nova|tigrao)\b", "vila nova"),
+            (r"\b(vila nova fc|vila nova go|vila nova|tigrao)\b", "vila nova"),
             # Ponte Preta
-            (r"\b(ponte preta sp|ponte preta|macaca)\b", "ponte preta"),
+            (r"\b(ponte preta sp|a a ponte preta|ponte preta|macaca)\b", "ponte preta"),
             # Guarani
-            (r"\b(guarani sp|guarani|bugre)\b", "guarani"),
+            (r"\b(guarani fc|guarani sp|guarani|bugre)\b", "guarani"),
             # Amazonas
-            (r"\b(amazonas am|amazonas|onca)\b", "amazonas"),
+            (r"\b(amazonas fc|amazonas am|amazonas|onca)\b", "amazonas"),
             # Brusque
-            (r"\b(brusque sc|brusque|quadricolor)\b", "brusque"),
+            (r"\b(brusque fc|brusque sc|brusque|quadricolor)\b", "brusque"),
             # Ituano
-            (r"\b(ituano sp|ituano|galo de itu)\b", "ituano"),
+            (r"\b(ituano fc|ituano sp|ituano|galo de itu)\b", "ituano"),
             # Paysandu
-            (r"\b(paysandu pa|paysandu|papao)\b", "paysandu"),
+            (r"\b(paysandu sc|paysandu pa|paysandu|papao)\b", "paysandu"),
             # Remo
             (r"\b(clube do remo|remo pa|remo|leao azul)\b", "remo"),
             # Avaí
-            (r"\b(avai sc|avai|leao da ilha)\b", "avai"),
+            (r"\b(avai fc|avai sc|avai|leao da ilha)\b", "avai"),
             # CRB / CSA
             (r"\b(clube de regatas brasil|crb al|crb|galo da praia)\b", "crb"),
             (r"\b(centro sportivo alagoano|csa al|csa|azulino)\b", "csa"),
+            (r"\b(athletic club|athletic mg|athletic)\b", "athletic"),
+            (r"\b(ferroviaria sp|ferroviaria|locomotiva)\b", "ferroviaria"),
+            (r"\b(volta redonda rj|volta redonda|voltaco)\b", "volta redonda"),
+            (r"\b(nautico pe|nautico|timbu)\b", "nautico"),
+            (r"\b(figueirense fc|figueirense sc|figueirense|figueira)\b", "figueirense"),
+            (r"\b(sampaio correa|sampaio correa ma|bolivia querida)\b", "sampaio correa"),
+            (r"\b(confianca se|confianca|dragao do bairro industrial)\b", "confianca"),
+            (r"\b(abc fc|abc rn|abc)\b", "abc"),
+            (r"\b(londrina ec|londrina pr|londrina|tubarao)\b", "londrina"),
         ]
 
         for pattern, rep in replacements:
@@ -3145,52 +3162,68 @@ def canonical_team_name(t):
     for p in prefixes:
         t_clean = re.sub(p, " ", t_clean)
     t_clean = re.sub(r'\s+', ' ', t_clean).strip()
+
+    # Limpeza prévia de siglas de estado no final para clubes de cidade única
+    state_strip_exceptions = ["atletico", "athletico", "america", "botafogo", "operario"]
+    if not any(exc in t_clean for exc in state_strip_exceptions):
+        t_clean = re.sub(r"\s+(mg|sp|rj|rs|pr|sc|ba|go|mt|ce|pe|al|rn|pb|am|pa|se|df|es|ma|pi|to|ro|ac|ap|rr)$", "", t_clean).strip()
     
     # Dicionário de padronização (Formato Bonito Canônico)
     canonical_map = [
-        (r"\b(vasco da gama|cr vasco da gama|vasco)\b", "Vasco da Gama"),
-        (r"\b(athletico paranaense|atletico paranaense|athletico pr|atletico pr|cap|athletico)\b", "Athletico-PR"),
-        (r"\b(atletico mineiro|atletico mg|cam|galo)\b", "Atlético-MG"),
+        (r"\b(vasco da gama|cr vasco da gama|vasco|vascao)\b", "Vasco da Gama"),
+        (r"\b(athletico paranaense|atletico paranaense|athletico pr|atletico pr|cap|athletico|furacao)\b", "Athletico-PR"),
         (r"\b(atletico goianiense|atletico go|acg|dragao)\b", "Atlético-GO"),
-        (r"\b(red bull bragantino|rb bragantino|bragantino|massa bruta)\b", "Red Bull Bragantino"),
-        (r"\b(corinthians paulista|corinthians|sccp|timao)\b", "Corinthians"),
-        (r"\b(sao paulo|spfc)\b", "São Paulo"),
-        (r"\b(palmeiras|verdao)\b", "Palmeiras"),
-        (r"\b(flamengo rj|flamengo|mengao|fla)\b", "Flamengo"),
-        (r"\b(fluminense rj|fluminense|flu)\b", "Fluminense"),
+        (r"\b(atletico mineiro|atletico mg|cam|galo|atletico)\b", "Atlético-MG"),
+        (r"\b(red bull bragantino|rb bragantino|bragantino sp|bragantino|massa bruta)\b", "Red Bull Bragantino"),
+        (r"\b(corinthians paulista|corinthians sp|corinthians|sccp|timao)\b", "Corinthians"),
+        (r"\b(sao paulo fc|sao paulo sp|sao paulo|spfc|tricolor paulista)\b", "São Paulo"),
+        (r"\b(se palmeiras|palmeiras sp|palmeiras|verdao|alviverde)\b", "Palmeiras"),
+        (r"\b(flamengo rj|cr flamengo|flamengo|mengao|fla|mengo)\b", "Flamengo"),
+        (r"\b(fluminense rj|fluminense fc|fluminense|flu|tricolor carioca|tricolor das laranjeiras)\b", "Fluminense"),
+        (r"\b(santos fc|santos sp|santos|peixe)\b", "Santos"),
         (r"\b(botafogo de ribeirao preto|botafogo sp)\b", "Botafogo-SP"),
+        (r"\b(botafogo pb|botafogo da paraiba)\b", "Botafogo-PB"),
         (r"\b(botafogo fr|botafogo rj|botafogo|fogao|bota)\b", "Botafogo"),
-        (r"\b(gremio novorizontino|novorizontino sp|novorizontino)\b", "Novorizontino"),
-        (r"\b(gremio fbpa|gremio porto alegrense|gremio rsg|gremio)\b", "Grêmio"),
+        (r"\b(gremio novorizontino|novorizontino sp|novorizontino|tigre do vale)\b", "Novorizontino"),
+        (r"\b(gremio fbpa|gremio porto alegrense|gremio rsg|gremio rs|gremio)\b", "Grêmio"),
         (r"\b(internacional de limeira|inter de limeira|inter limeira)\b", "Inter de Limeira"),
-        (r"\b(internacional rs|inter de porto alegre|inter rs|internacional|inter)\b", "Internacional"),
-        (r"\b(cruzeiro mg|cruzeiro)\b", "Cruzeiro"),
-        (r"\b(juventude rs|juventude)\b", "Juventude"),
-        (r"\b(fortaleza ce|fortaleza)\b", "Fortaleza"),
-        (r"\b(ceara ce|ceara|vozao)\b", "Ceará"),
-        (r"\b(bahia ba|bahia|esquadrao)\b", "Bahia"),
-        (r"\b(vitoria ba|vitoria|leao da barra)\b", "Vitória"),
-        (r"\b(cuiaba mt|cuiaba|dourado)\b", "Cuiabá"),
-        (r"\b(criciuma sc|criciuma|tigre)\b", "Criciúma"),
+        (r"\b(internacional rs|inter de porto alegre|inter rs|internacional|inter|colorado)\b", "Internacional"),
+        (r"\b(cruzeiro ec|cruzeiro mg|cruzeiro|raposa)\b", "Cruzeiro"),
+        (r"\b(juventude rs|juventude|papo)\b", "Juventude"),
+        (r"\b(fortaleza ec|fortaleza ce|fortaleza|leao do pici)\b", "Fortaleza"),
+        (r"\b(ceara sc|ceara ce|ceara|vozao|vovo)\b", "Ceará"),
+        (r"\b(bahia ba|ec bahia|bahia|esquadrao|tricolor de aco)\b", "Bahia"),
+        (r"\b(vitoria ba|ec vitoria|vitoria|leao da barra)\b", "Vitória"),
+        (r"\b(cuiaba ec|cuiaba mt|cuiaba|dourado)\b", "Cuiabá"),
+        (r"\b(criciuma ec|criciuma sc|criciuma|tigre)\b", "Criciúma"),
         (r"\b(coritiba fcf|coritiba pr|coritiba|coxa)\b", "Coritiba"),
-        (r"\b(goias go|goias|esmeraldino)\b", "Goiás"),
+        (r"\b(goias ec|goias go|goias|esmeraldino)\b", "Goiás"),
         (r"\b(sport club do recife|sport recife|sport pe|sport|leao da ilha)\b", "Sport"),
         (r"\b(america de natal|america rn)\b", "América-RN"),
-        (r"\b(america mineiro|america mg|coelho)\b", "América-MG"),
+        (r"\b(america mineiro|america mg|coelho|america)\b", "América-MG"),
         (r"\b(chapecoense af|chapecoense sc|chapecoense|chape)\b", "Chapecoense"),
-        (r"\b(mirassol sp|mirassol)\b", "Mirassol"),
-        (r"\b(operario ferroviario|operario pr|operario)\b", "Operário-PR"),
-        (r"\b(vila nova go|vila nova|tigrao)\b", "Vila Nova"),
-        (r"\b(ponte preta sp|ponte preta|macaca)\b", "Ponte Preta"),
-        (r"\b(guarani sp|guarani|bugre)\b", "Guarani"),
-        (r"\b(amazonas am|amazonas|onca)\b", "Amazonas"),
-        (r"\b(brusque sc|brusque|quadricolor)\b", "Brusque"),
-        (r"\b(ituano sp|ituano|galo de itu)\b", "Ituano"),
-        (r"\b(paysandu pa|paysandu|papao)\b", "Paysandu"),
+        (r"\b(mirassol fc|mirassol sp|mirassol|leaozinho)\b", "Mirassol"),
+        (r"\b(operario ferroviario|operario pr|operario|fantasma)\b", "Operário-PR"),
+        (r"\b(vila nova fc|vila nova go|vila nova|tigrao)\b", "Vila Nova"),
+        (r"\b(ponte preta sp|a a ponte preta|ponte preta|macaca)\b", "Ponte Preta"),
+        (r"\b(guarani fc|guarani sp|guarani|bugre)\b", "Guarani"),
+        (r"\b(amazonas fc|amazonas am|amazonas|onca)\b", "Amazonas"),
+        (r"\b(brusque fc|brusque sc|brusque|quadricolor)\b", "Brusque"),
+        (r"\b(ituano fc|ituano sp|ituano|galo de itu)\b", "Ituano"),
+        (r"\b(paysandu sc|paysandu pa|paysandu|papao)\b", "Paysandu"),
         (r"\b(clube do remo|remo pa|remo|leao azul)\b", "Remo"),
-        (r"\b(avai sc|avai|leao da ilha)\b", "Avaí"),
+        (r"\b(avai fc|avai sc|avai|leao da ilha)\b", "Avaí"),
         (r"\b(clube de regatas brasil|crb al|crb|galo da praia)\b", "CRB"),
         (r"\b(centro sportivo alagoano|csa al|csa|azulino)\b", "CSA"),
+        (r"\b(athletic club|athletic mg|athletic)\b", "Athletic Club"),
+        (r"\b(ferroviaria sp|ferroviaria|locomotiva)\b", "Ferroviária"),
+        (r"\b(volta redonda rj|volta redonda|voltaco)\b", "Volta Redonda"),
+        (r"\b(nautico pe|nautico|timbu)\b", "Náutico"),
+        (r"\b(figueirense fc|figueirense sc|figueirense|figueira)\b", "Figueirense"),
+        (r"\b(sampaio correa|sampaio correa ma|bolivia querida)\b", "Sampaio Corrêa"),
+        (r"\b(confianca se|confianca|dragao do bairro industrial)\b", "Confiança"),
+        (r"\b(abc fc|abc rn|abc)\b", "ABC"),
+        (r"\b(londrina ec|londrina pr|londrina|tubarao)\b", "Londrina"),
     ]
     
     # Aplica o mapa para achar o nome bonito
@@ -3540,10 +3573,11 @@ def parse_cbf_pdf(pdf_path, nome_original):
             page.close()
         doc.close()
         
-        if "Copa do Brasil" in nome_original:
+        is_cdb = "Copa do Brasil" in nome_original
+        if is_cdb:
             legend = {"3": "Amazon Prime"}
             target_ids = ["3"]
-        else: # Brasileirão Série A
+        else:  # Brasileirão Série A
             legend = {"4": "Amazon Prime", "5": "Cazé TV"}
             target_ids = ["4", "5"]
         
@@ -3570,24 +3604,28 @@ def parse_cbf_pdf(pdf_path, nome_original):
                     if re.search(r'\b\d+\s+x\s+\d+\b', line): continue
                     if re.search(r'\(\d+\)', line): continue
                     
-                    parts = line.split(" x ")
-                    if len(parts) >= 2:
-                        all_nums_pt2 = re.findall(r'\b(\d+)\b', parts[1])
-                        relevant_nums = [n for n in all_nums_pt2 if n in target_ids]
-                        logging.debug(f"Linha Jogo: {line} | IDs encontrados: {all_nums_pt2} | Relevantes: {relevant_nums}")
-                        
-                        if not relevant_nums:
-                            continue
-                        
-                        tv_str = ", ".join([legend.get(n, n) for n in relevant_nums])
+                    # 🔥 REGRA CRÍTICA: Os números de transmissão (legendas) estão estritamente no final da linha
+                    m_tv = re.search(r'(?:[A-Z]{2}\s+)?([1-7](?:\s+[1-7])*)\s*$', line)
+                    if not m_tv:
+                        continue
+                    tv_col_nums = m_tv.group(1).split()
+                    relevant_nums = [n for n in tv_col_nums if n in target_ids]
+                    logging.debug(f"Linha Jogo: {line} | TV cols: {tv_col_nums} | Relevantes: {relevant_nums}")
+                    
+                    if not relevant_nums:
+                        continue
+                    
+                    tv_str = ", ".join([legend.get(n, n) for n in relevant_nums])
 
                     # Limpeza de nomes
+                    parts = line.split(" x ")
                     pt1 = parts[0]
                     # Remove hora se estiver no início do nome do time 1
                     m_time = re.search(r'\d{2}:\d{2}', pt1)
                     if m_time: pt1 = pt1[m_time.end():].strip()
-                    # Remove números de ID no início
+                    # Remove números de ID / Rodada no início
                     pt1 = re.sub(r'^\d+\s+', '', pt1).strip()
+                    pt1 = re.sub(r'^\d+ª?\s+', '', pt1).strip()
                     # Remove placares entre parênteses
                     pt1 = re.sub(r'\(.*?\)', '', pt1).strip()
                     # Remove UF (estado)
@@ -3598,10 +3636,12 @@ def parse_cbf_pdf(pdf_path, nome_original):
                     pt2 = re.sub(r'\(.*?\)', '', pt2).strip()
                     # Remove UF e tudo que vem depois no time 2 (Estádio, Cidade, Canal)
                     pt2 = re.sub(r'\s[A-Z]{2}\b.*$', '', pt2).strip()
-                    jogo_clean = f"{pt1} x {pt2}"
+                    
+                    jogo_bruto = f"{pt1.strip()} x {pt2.strip()}"
+                    jogo_clean = prettify_match_name(jogo_bruto)
                     
                     extracted.append({
-                        "Camp": nome_original, # Mantém o nome limpo aqui
+                        "Camp": nome_original,  # Mantém o nome limpo aqui
                         "Jogo": jogo_clean,
                         "Data": current_date,
                         "Hora": hora,
@@ -4055,6 +4095,16 @@ def run_eventos_prime(url_camp, expected_camp=""):
         logging.info(f"[Prime] Total de cards de eventos encontrados nas listas válidas: {len(cards)}")
 
         for idx, card in enumerate(cards):
+            card_text_raw = ""
+            try:
+                card_text_raw = card.text.strip().lower()
+            except Exception:
+                pass
+            
+            # 🔥 REGRA CRÍTICA: Ignorar cards de canais terceiros / Premiere no Prime Video
+            if any(ch in card_text_raw for ch in ["premiere", "subscreva", "assine", "store filled", "combate", "paramount", "telecine"]):
+                logging.info(f"[Prime] Ignorando card {idx} por pertencer a canal adicional/Premiere: {card_text_raw[:60]}")
+                continue
 
             # Título confiável via atributo ou aria-label/alt para super-carousel-cards
             nome_evento = card.get_attribute("data-card-title") or ""
@@ -4073,6 +4123,11 @@ def run_eventos_prime(url_camp, expected_camp=""):
                     nome_evento = card.find_element(By.CSS_SELECTOR, "a._3HZFFn").text.strip()
                 except Exception:
                     nome_evento = ""
+
+            # Verifica também se o nome do evento tem indicação de Premiere
+            if "premiere" in nome_evento.lower():
+                logging.info(f"[Prime] Ignorando evento '{nome_evento}' por ser Premiere.")
+                continue
 
             data_hora = ""
 
