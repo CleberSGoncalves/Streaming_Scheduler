@@ -2587,9 +2587,16 @@ def preencher_sharepoint():
     except Exception:
         pass
 
-    # Filtro de segurança para evitar NoneType
-    rows = [tree.item(iid, "values") for iid in tree.get_children()]
-    rows = [r for r in rows if r and len(r) >= 8]
+    # Filtro de segurança para evitar NoneType e jogos sem direitos de transmissão
+    rows_raw = [tree.item(iid, "values") for iid in tree.get_children()]
+    rows = []
+    for r in rows_raw:
+        if r and len(r) >= 8:
+            camp, part, _, _, _, _, plat, _ = r[:8]
+            if not is_cbf_broadcast_authorized(camp, part, plat):
+                logging.warning(f"[SharePoint Bloqueio] Jogo '{part}' ({camp}) [{plat}] não autorizado pela tabela da CBF. Bloqueado.")
+                continue
+            rows.append(r)
 
     if not rows:
         logging.warning("Não há linhas válidas no grid para enviar ao SharePoint.")
@@ -3439,11 +3446,163 @@ def get_latest_cbf_url(comp_type):
                 
     # Fallback para URLs atualizadas se a busca falhar ou der erro
     fallbacks = {
-        "BSA": "https://stcbfsiteprdimgbrs.blob.core.windows.net/img-site/cdn/Tabela_Detalhada_BSA_2026_06_07_db8090e380.pdf",
-        "CDB": "https://stcbfsiteprdimgbrs.blob.core.windows.net/img-site/cdn/Tabela_Detalhada_Copa_do_Brasil_2026_08_07_8dfc6382ed.pdf"
+        "BSA": "https://stcbfsiteprdimgbrs.blob.core.windows.net/img-site/cdn/Tabela_Detalhada_BSA_2026_05_10_cd1e0860b2.pdf",
+        "CDB": "https://stcbfsiteprdimgbrs.blob.core.windows.net/img-site/cdn/Tabela_Detalhada_Copa_do_Brasil_2026_07_10_0c40ca55b3.pdf"
     }
     logging.info(f"[CBF] Usando fallback para {comp_type}: {fallbacks.get(comp_type)}")
     return fallbacks.get(comp_type)
+
+_CBF_RIGHTS_CACHE = {}
+
+def get_cbf_rights_index(force_reload=False):
+    """
+    Carrega e indexa todas as partidas e suas respectivas colunas de direitos de transmissão (TV)
+    diretamente das Tabelas Detalhadas oficiais da CBF (PDFs).
+    Retorna dict com chaves 'brasileirao' e 'copa_do_brasil'.
+    """
+    global _CBF_RIGHTS_CACHE
+    if _CBF_RIGHTS_CACHE and not force_reload:
+        return _CBF_RIGHTS_CACHE
+
+    import pypdfium2 as pdfium
+    from sharepoint_client import _deep_normalize_partida
+
+    index = {'brasileirao': {}, 'copa_do_brasil': {}}
+
+    # 1. Brasileirão Série A
+    bsa_files = ['temp_Brasileirão_Série_A.pdf', 'latest_bsa.pdf']
+    for fn in bsa_files:
+        if os.path.exists(fn):
+            try:
+                doc = pdfium.PdfDocument(fn)
+                full_text = ''
+                for i in range(len(doc)):
+                    page = doc.get_page(i)
+                    tp = page.get_textpage()
+                    full_text += tp.get_text_bounded() + '\n'
+                    tp.close()
+                    page.close()
+                doc.close()
+
+                for line in full_text.split('\n'):
+                    line = line.strip()
+                    if ' x ' in line and re.search(r'\d{2}:\d{2}', line):
+                        if re.search(r'\b\d+\s+x\s+\d+\b', line): continue
+                        if re.search(r'\(\d+\)', line): continue
+                        m_tv = re.search(r'(?:[A-Z]{2}\s+)?([1-7](?:\s+[1-7])*)\s*$', line)
+                        cols = set(m_tv.group(1).split()) if m_tv else set()
+                        parts = line.split(' x ')
+                        pt1 = parts[0]
+                        m_time = re.search(r'\d{2}:\d{2}', pt1)
+                        if m_time: pt1 = pt1[m_time.end():].strip()
+                        pt1 = re.sub(r'^\d+\s+', '', pt1).strip()
+                        pt1 = re.sub(r'^\d+ª?\s+', '', pt1).strip()
+                        pt1 = re.sub(r'\(.*?\)', '', pt1).strip()
+                        pt1 = re.sub(r'\b[A-Z]{2}\b$', '', pt1).strip()
+                        pt1 = re.sub(r'\b[A-Z]{2}\b', '', pt1).strip()
+                        pt2 = parts[1]
+                        pt2 = re.sub(r'\(.*?\)', '', pt2).strip()
+                        pt2 = re.sub(r'\s[A-Z]{2}\b.*$', '', pt2).strip()
+                        jogo = f'{pt1.strip()} x {pt2.strip()}'
+                        p_t = _deep_normalize_partida(jogo)
+                        if p_t and p_t != ('',):
+                            index['brasileirao'][p_t] = cols
+                if index['brasileirao']:
+                    logging.info(f"[CBF Index] {len(index['brasileirao'])} jogos do Brasileirão indexados de {fn}.")
+                    break
+            except Exception as e:
+                logging.warning(f"[CBF Index] Erro ao ler PDF {fn}: {e}")
+
+    # 2. Copa do Brasil
+    cdb_files = ['temp_Copa_do_Brasil.pdf', 'latest_cdb.pdf']
+    for fn in cdb_files:
+        if os.path.exists(fn):
+            try:
+                doc = pdfium.PdfDocument(fn)
+                full_text = ''
+                for i in range(len(doc)):
+                    page = doc.get_page(i)
+                    tp = page.get_textpage()
+                    full_text += tp.get_text_bounded() + '\n'
+                    tp.close()
+                    page.close()
+                doc.close()
+
+                for line in full_text.split('\n'):
+                    line = line.strip()
+                    if ' x ' in line and re.search(r'\d{2}:\d{2}', line):
+                        if re.search(r'\b\d+\s+x\s+\d+\b', line): continue
+                        if re.search(r'\(\d+\)', line): continue
+                        m_tv = re.search(r'(?:[A-Z]{2}\s+)?([1-7](?:\s+[1-7])*)\s*$', line)
+                        cols = set(m_tv.group(1).split()) if m_tv else set()
+                        parts = line.split(' x ')
+                        pt1 = parts[0]
+                        m_time = re.search(r'\d{2}:\d{2}', pt1)
+                        if m_time: pt1 = pt1[m_time.end():].strip()
+                        pt1 = re.sub(r'^\d+\s+', '', pt1).strip()
+                        pt1 = re.sub(r'^\d+ª?\s+', '', pt1).strip()
+                        pt1 = re.sub(r'\(.*?\)', '', pt1).strip()
+                        pt1 = re.sub(r'\b[A-Z]{2}\b$', '', pt1).strip()
+                        pt1 = re.sub(r'\b[A-Z]{2}\b', '', pt1).strip()
+                        pt2 = parts[1]
+                        pt2 = re.sub(r'\(.*?\)', '', pt2).strip()
+                        pt2 = re.sub(r'\s[A-Z]{2}\b.*$', '', pt2).strip()
+                        jogo = f'{pt1.strip()} x {pt2.strip()}'
+                        p_t = _deep_normalize_partida(jogo)
+                        if p_t and p_t != ('',):
+                            index['copa_do_brasil'][p_t] = cols
+                if index['copa_do_brasil']:
+                    logging.info(f"[CBF Index] {len(index['copa_do_brasil'])} jogos da Copa do Brasil indexados de {fn}.")
+                    break
+            except Exception as e:
+                logging.warning(f"[CBF Index] Erro ao ler PDF {fn}: {e}")
+
+    _CBF_RIGHTS_CACHE = index
+    return index
+
+def is_cbf_broadcast_authorized(camp_name: str, match_name: str, platform_name: str) -> bool:
+    """
+    Valida estritamente se um jogo tem direitos de transmissão na plataforma indicada,
+    de acordo com as regras oficiais de colunas de TV da CBF:
+    - Brasileirão Série A:
+        * Coluna 4: Amazon Prime
+        * Coluna 5: YouTube / Cazé TV
+        * Colunas 1, 2, 3, 6, 7: Outras emissoras / Premiere / Globo / etc. (NÃO autorizado)
+    - Copa do Brasil:
+        * Coluna 3: Amazon Prime
+    Para outros campeonatos (Libertadores, Paulistão, etc.), retorna True.
+    """
+    c_lower = str(camp_name).lower()
+    p_lower = str(platform_name).lower()
+
+    is_bsa = 'brasileir' in c_lower or 'serie a' in c_lower
+    is_cdb = 'copa do brasil' in c_lower
+    if not (is_bsa or is_cdb):
+        return True
+
+    from sharepoint_client import _deep_normalize_partida
+    idx = get_cbf_rights_index()
+    p_tuple = _deep_normalize_partida(match_name)
+
+    if is_bsa:
+        cols = idx['brasileirao'].get(p_tuple)
+        if cols is not None:
+            if 'prime' in p_lower or 'amazon' in p_lower:
+                return '4' in cols
+            elif 'caze' in p_lower or 'cazé' in p_lower or 'youtube' in p_lower:
+                return '5' in cols
+            return True
+        return True
+
+    if is_cdb:
+        cols = idx['copa_do_brasil'].get(p_tuple)
+        if cols is not None:
+            if 'prime' in p_lower or 'amazon' in p_lower:
+                return '3' in cols
+            return True
+        return True
+
+    return True
 
 def run_eventos_cbf():
     """
@@ -4347,9 +4506,16 @@ def run_eventos_prime(url_camp, expected_camp=""):
             dt = data_hora_formatada.get('data', '')
 
             if nome_evento.strip() and dt:
+                jogo_limpo = prettify_match_name(nome_evento)
+                # 🔥 REGRA CRÍTICA: Validar direitos oficiais da CBF para Brasileirão e Copa do Brasil
+                # Ignora jogos de canais adicionais/Premiere exibidos no carrossel do Prime Video (ex: Grêmio x Cruzeiro)
+                if not is_cbf_broadcast_authorized(campeonato, jogo_limpo, plataforma):
+                    logging.info(f"[Prime] Jogo '{jogo_limpo}' descartado: não possui direitos de transmissão ({plataforma}) na tabela oficial da CBF.")
+                    continue
+
                 csv_row = (
                     campeonato,
-                    prettify_match_name(nome_evento),
+                    jogo_limpo,
                     data_hora_formatada['data'],
                     data_hora_formatada['hora'],
                     var_navegador,
@@ -5049,8 +5215,13 @@ def run_busca_eventos(ignorar_trava=False):
                         csv_list = ("CONMEBOL Sudamericana", event, data, horario, var_navegador, 15, plataforma, url)
 
                     if csv_list:
-                        # Aplica nome canônico bonito antes de inserir no grid
-                        csv_list = (csv_list[0], prettify_match_name(csv_list[1])) + csv_list[2:]
+                        # Aplica nome canônico bonito e valida direitos oficiais da CBF
+                        camp_val, part_val, dt_val, hr_val, nav_val, min_val, plat_val, url_val = csv_list
+                        part_val = prettify_match_name(part_val)
+                        if not is_cbf_broadcast_authorized(camp_val, part_val, plat_val):
+                            logging.info(f"[Cazé TV] Jogo '{part_val}' ({camp_val}) descartado: sem direitos na tabela oficial da CBF (Coluna 5).")
+                            continue
+                        csv_list = (camp_val, part_val, dt_val, hr_val, nav_val, min_val, plat_val, url_val)
                         tree.insert("", "end", values=csv_list)
                         var_navegador = "Direita" if var_navegador == "Esquerda" else "Esquerda"
 

@@ -710,6 +710,26 @@ def push_events_to_sharepoint(items: List[Dict[str, Any]]) -> Dict[str, Any]:
         logger.info("[SharePoint] Nenhum item recebido para envio.")
         return {"total": 0, "inserted": 0, "skipped_existing": 0, "errors": []}
 
+    # Validação de segurança adicional: bloquear jogos do Brasileirão/Copa do Brasil sem direitos oficiais
+    try:
+        from Streaming_Scheduler import is_cbf_broadcast_authorized
+        items_validos = []
+        for it in items:
+            c = it.get("Campeonato", "")
+            p = it.get("Partida", "")
+            ch = it.get("Canal de Transmissão", "")
+            if is_cbf_broadcast_authorized(c, p, ch):
+                items_validos.append(it)
+            else:
+                logger.warning(f"[SharePoint Bloqueio] Evento '{p}' ({c}) [{ch}] rejeitado por não possuir direitos oficiais na CBF.")
+        items = items_validos
+    except Exception as e:
+        logger.debug(f"[SharePoint] Verificação CBF rights ignorada: {e}")
+
+    if not items:
+        logger.info("[SharePoint] Nenhum item válido após filtragem de direitos CBF.")
+        return {"total": 0, "inserted": 0, "skipped_existing": 0, "errors": []}
+
     # 1. Tentativa Principal: Comunicação Direta via Graph API
     try:
         logger.info("[SharePoint] Iniciando envio direto via Microsoft Graph API...")
