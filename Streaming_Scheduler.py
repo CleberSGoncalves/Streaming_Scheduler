@@ -392,7 +392,7 @@ import threading
 from shareplum import Site 
 from requests_ntlm import HttpNtlmAuth
 import csv, sys
-import pandas as pd
+# pandas e numpy removidos para evitar falhas de C-extensions em tempo de execução
 from tkcalendar import DateEntry
 from datetime import datetime
 import subprocess
@@ -3725,81 +3725,84 @@ def run_eventos_cbf():
                 xls_path = os.path.join(os.getcwd(), "Tabela_Completa_Copa_Mundo_2026_Fase_Grupos.xlsx")
                 if os.path.exists(xls_path):
                     logging.info(f"Processando Tabela Excel CBF - Copa do Mundo FIFA 2026: {xls_path}")
-                    import pandas as pd
-                    df = pd.read_excel(xls_path)
+                    import openpyxl
+                    wb = openpyxl.load_workbook(xls_path, data_only=True)
+                    sheet = wb.active
+                    rows_iter = list(sheet.iter_rows(values_only=True))
                     
-                    # Identificação de colunas (Data, Hora, Jogo)
-                    col_data = next((c for c in df.columns if 'DATA' in str(c).upper()), None)
-                    col_hora = next((c for c in df.columns if 'HORA' in str(c).upper()), None)
-                    col_jogo = next((c for c in df.columns if 'JOGO' in str(c).upper()), None)
-                    
-                    if col_data and col_hora and col_jogo:
-                        # Data de início para filtro (da UI)
-                        try:
-                            data_inicio_str = entry_data.get()
-                            data_inicio_obj = datetime.strptime(data_inicio_str, "%d/%m/%Y")
-                        except:
-                            data_inicio_obj = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-
-                        var_navegador_xls = "Esquerda"
-                        cont_inseridos_xls = 0
+                    if rows_iter:
+                        headers = [str(h or '').upper() for h in rows_iter[0]]
+                        idx_data = next((i for i, h in enumerate(headers) if 'DATA' in h), None)
+                        idx_hora = next((i for i, h in enumerate(headers) if 'HORA' in h), None)
+                        idx_jogo = next((i for i, h in enumerate(headers) if 'JOGO' in h), None)
                         
-                        for _, row in df.iterrows():
-                            data_raw = str(row[col_data]).strip()
-                            hora_raw = str(row[col_hora]).strip()
-                            jogo_raw = str(row[col_jogo]).strip()
+                        if idx_data is not None and idx_hora is not None and idx_jogo is not None:
+                            # Data de início para filtro (da UI)
+                            try:
+                                data_inicio_str = entry_data.get()
+                                data_inicio_obj = datetime.strptime(data_inicio_str, "%d/%m/%Y")
+                            except:
+                                data_inicio_obj = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+                            var_navegador_xls = "Esquerda"
+                            cont_inseridos_xls = 0
                             
-                            if not jogo_raw or jogo_raw == "nan" or jogo_raw == "None": continue
+                            for r_vals in rows_iter[1:]:
+                                data_raw = str(r_vals[idx_data] or '').strip()
+                                hora_raw = str(r_vals[idx_hora] or '').strip()
+                                jogo_raw = str(r_vals[idx_jogo] or '').strip()
+                                
+                                if not jogo_raw or jogo_raw.lower() in ("nan", "none", ""): continue
 
-                            # Normalização de data
-                            try:
-                                if " " in data_raw: data_raw = data_raw.split(" ")[0]
-                                if "-" in data_raw:
-                                    dt_obj = datetime.strptime(data_raw, "%Y-%m-%d")
-                                    data_formatada = dt_obj.strftime("%d/%m/%Y")
-                                else:
+                                # Normalização de data
+                                try:
+                                    if " " in data_raw: data_raw = data_raw.split(" ")[0]
+                                    if "-" in data_raw:
+                                        dt_obj = datetime.strptime(data_raw, "%Y-%m-%d")
+                                        data_formatada = dt_obj.strftime("%d/%m/%Y")
+                                    else:
+                                        data_formatada = data_raw
+                                except Exception:
                                     data_formatada = data_raw
-                            except:
-                                data_formatada = data_raw
-                                
-                            # Ajuste de -2 horas conforme solicitado e correção de data se mudar de dia
-                            data_ajustada = data_formatada
-                            hora_ajustada = hora_raw
-                            try:
-                                dt_combined = None
-                                for fmt_h in ("%H:%M", "%H:%M:%S"):
-                                    try:
-                                        dt_combined = datetime.strptime(f"{data_formatada} {hora_raw}", f"%d/%m/%Y {fmt_h}")
-                                        break
-                                    except:
-                                        pass
-                                if dt_combined:
-                                    dt_ajustada = dt_combined - timedelta(hours=2)
-                                    data_ajustada = dt_ajustada.strftime("%d/%m/%Y")
-                                    hora_ajustada = dt_ajustada.strftime("%H:%M")
-                            except Exception as e:
-                                logging.warning(f"Erro ao ajustar data/hora em Copa do Mundo Excel ({data_formatada} {hora_raw}): {e}")
+                                    
+                                # Ajuste de -2 horas conforme solicitado e correção de data se mudar de dia
+                                data_ajustada = data_formatada
+                                hora_ajustada = hora_raw
+                                try:
+                                    dt_combined = None
+                                    for fmt_h in ("%H:%M", "%H:%M:%S"):
+                                        try:
+                                            dt_combined = datetime.strptime(f"{data_formatada} {hora_raw}", f"%d/%m/%Y {fmt_h}")
+                                            break
+                                        except:
+                                            pass
+                                    if dt_combined:
+                                        dt_ajustada = dt_combined - timedelta(hours=2)
+                                        data_ajustada = dt_ajustada.strftime("%d/%m/%Y")
+                                        hora_ajustada = dt_ajustada.strftime("%H:%M")
+                                except Exception as e:
+                                    logging.warning(f"Erro ao ajustar data/hora em Copa do Mundo Excel ({data_formatada} {hora_raw}): {e}")
 
-                            # Filtro de data futura usando a data ajustada
-                            try:
-                                ev_date_obj = datetime.strptime(data_ajustada, "%d/%m/%Y")
-                                if ev_date_obj < data_inicio_obj:
+                                # Filtro de data futura usando a data ajustada
+                                try:
+                                    ev_date_obj = datetime.strptime(data_ajustada, "%d/%m/%Y")
+                                    if ev_date_obj < data_inicio_obj:
+                                        continue
+                                except:
+                                    pass
+                                    
+                                # 🔥 REGRA DE PRIORIDADE: Se já existir no grid (Selenium), ignora o Excel (compara com data original e ajustada)
+                                if is_match_already_in_tree(jogo_raw, data_raw) or is_match_already_in_tree(jogo_raw, data_ajustada):
+                                    logging.info(f"Ignorando duplicata Excel (Já no grid): {jogo_raw} em {data_raw} / {data_ajustada}")
                                     continue
-                            except:
-                                pass
-                                
-                            # 🔥 REGRA DE PRIORIDADE: Se já existir no grid (Selenium), ignora o Excel (compara com data original e ajustada)
-                            if is_match_already_in_tree(jogo_raw, data_raw) or is_match_already_in_tree(jogo_raw, data_ajustada):
-                                logging.info(f"Ignorando duplicata Excel (Já no grid): {jogo_raw} em {data_raw} / {data_ajustada}")
-                                continue
 
-                            # Inserção no grid (Forçando 'Cazé TV' e URL do YouTube)
-                            caze_url = "https://www.youtube.com/@CazeTV/streams"
-                            jogo_bonito_xls = prettify_match_name(jogo_raw)
-                            row_data = ("CBF - Copa do Mundo FIFA 2026", jogo_bonito_xls, data_ajustada, hora_ajustada, var_navegador_xls, "15", "Cazé TV", caze_url)
-                            tree.insert("", "end", values=row_data)
-                            var_navegador_xls = "Direita" if var_navegador_xls == "Esquerda" else "Esquerda"
-                            cont_inseridos_xls += 1
+                                # Inserção no grid (Forçando 'Cazé TV' e URL do YouTube)
+                                caze_url = "https://www.youtube.com/@CazeTV/streams"
+                                jogo_bonito_xls = prettify_match_name(jogo_raw)
+                                row_data = ("CBF - Copa do Mundo FIFA 2026", jogo_bonito_xls, data_ajustada, hora_ajustada, var_navegador_xls, "15", "Cazé TV", caze_url)
+                                tree.insert("", "end", values=row_data)
+                                var_navegador_xls = "Direita" if var_navegador_xls == "Esquerda" else "Esquerda"
+                                cont_inseridos_xls += 1
                             
                         logging.info(f"Excel Copa do Mundo: Inseridos {cont_inseridos_xls} jogos.")
                 else:
@@ -5928,37 +5931,41 @@ def lerCSV():
     file = 'Programação de eventos - Streaming.csv'
     dir_final = os.path.join(cwd,file)
 
-    csv_list = ()
-    list_b = list(csv_list)
-
- 
-    # Defining the columns to read
-    usecols = ["Data", "Horário","Campeonato", "Partida", "Canal de Transmissão", "Url"]
-    data = pd.read_csv(dir_final, usecols=usecols)
-    df = pd.DataFrame(data)
-
+    list_b = []
+    if not os.path.exists(dir_final):
+        return list_b
 
     data_string = entry_data.get()
     formato = "%d/%m/%Y"
-    data_objeto = datetime.strptime(data_string, formato)
+    try:
+        data_objeto = datetime.strptime(data_string, formato)
+    except Exception:
+        data_objeto = datetime.now()
 
-   # Iterating over rows
-    for index, row in df.iterrows():
+    try:
+        with open(dir_final, mode='r', encoding='utf-8', errors='ignore') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                d_str = str(row.get('Data', '')).strip()
+                url_str = str(row.get('Url', '')).strip()
+                if d_str and d_str.lower() != 'nan' and url_str and url_str.lower() != 'nan':
+                    try:
+                        data_csv = datetime.strptime(d_str, formato)
+                        if data_csv >= data_objeto:
+                            csv_list = (
+                                row.get('Data', ''),
+                                row.get('Horário', ''),
+                                row.get('Campeonato', ''),
+                                row.get('Partida', ''),
+                                row.get('Canal de Transmissão', ''),
+                                row.get('Url', '')
+                            )
+                            list_b.append(csv_list)
+                    except Exception:
+                        pass
+    except Exception as e:
+        logging.error(f"Erro ao ler CSV: {e}")
 
-       data_string = str(row['Data'])
-       url_string = str(row['Url'])
-
-       if data_string != 'nan' and url_string != 'nan'  :
-        formato = "%d/%m/%Y"
-        data_csv = datetime.strptime(data_string, formato)
-
-        if data_csv >= data_objeto:
-
-         csv_list = (row['Data'],row['Horário'],row['Campeonato'],row['Partida'],row['Canal de Transmissão'],row['Url'])
-
-         list_b.append(csv_list)
-       
-  
     return list_b
 
 
