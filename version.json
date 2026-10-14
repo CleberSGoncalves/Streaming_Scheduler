@@ -1,5 +1,5 @@
 {
-  "version": "17.4",
-  "download_url": "https://github.com/CleberSGoncalves/Streaming_Scheduler/releases/download/v17.4/Streaming_Scheduler.exe",
-  "changelog": "v17.4: Teste de validação do sistema de auto-atualização direta via GitHub Releases."
+  "version": "17.5",
+  "download_url": "https://github.com/CleberSGoncalves/Streaming_Scheduler/releases/download/v17.5/Streaming_Scheduler.exe",
+  "changelog": "v17.5: Correção definitiva da persistência de configurações (plataformas, campeonatos, modo somente relatório e agendamento) e resolução resiliente de diretório da aplicação."
 }

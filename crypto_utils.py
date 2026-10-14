@@ -1,13 +1,30 @@
-from cryptography.fernet import Fernet, InvalidToken
-import xml.etree.ElementTree as ET
+import sys
 import os
+import xml.etree.ElementTree as ET
 import base64
+from cryptography.fernet import Fernet, InvalidToken
+
+def get_app_dir():
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+def get_app_path(rel_path):
+    if not rel_path:
+        return get_app_dir()
+    if os.path.isabs(rel_path):
+        return rel_path
+    return os.path.join(get_app_dir(), rel_path)
 
 # === Criptografia Fernet ===
-def carregar_env_criptografado(caminho=".env.enc"):
+def carregar_env_criptografado(caminho=None):
     """
     Carrega um .env criptografado e retorna um dicionário com os valores descriptografados
     """
+    if caminho is None:
+        caminho = get_app_path(".env.enc")
+    else:
+        caminho = get_app_path(caminho)
     env_dict = {}
     try:
         with open(caminho, "r") as file:
@@ -23,15 +40,23 @@ def carregar_env_criptografado(caminho=".env.enc"):
         print(f"[ERRO] Arquivo {caminho} não encontrado")
     return env_dict
 
-def gerar_chave():
+def gerar_chave(caminho=None):
     """Gera e salva uma nova chave de criptografia em 'secret.key'."""
+    if caminho is None:
+        caminho = get_app_path("secret.key")
+    else:
+        caminho = get_app_path(caminho)
     key = Fernet.generate_key()
-    with open("secret.key", "wb") as f:
+    with open(caminho, "wb") as f:
         f.write(key)
 
-def carregar_chave():
+def carregar_chave(caminho=None):
     """Carrega a chave de criptografia do arquivo 'secret.key'."""
-    return open("secret.key", "rb").read()
+    if caminho is None:
+        caminho = get_app_path("secret.key")
+    else:
+        caminho = get_app_path(caminho)
+    return open(caminho, "rb").read()
 
 def criptografar(texto):
     """Criptografa uma string com Fernet."""
@@ -54,10 +79,14 @@ def descriptografar(texto):
         return texto
 # === .env.enc ===
 
-def get_env_value(chave, caminho=".env.enc"):
+def get_env_value(chave, caminho=None):
     """
     Retorna o valor descriptografado da chave fornecida do arquivo .env.enc
     """
+    if caminho is None:
+        caminho = get_app_path(".env.enc")
+    else:
+        caminho = get_app_path(caminho)
     try:
         with open(caminho, "r") as file:
             for line in file:
@@ -73,11 +102,15 @@ def get_env_value(chave, caminho=".env.enc"):
 
 # === config.xml ===
 
-def get_config_value(tag, caminho="config.xml"):
+def get_config_value(tag, caminho=None):
     """
     Retorna o valor descriptografado de uma tag do config.xml.
     Exemplo: get_config_value("usuario_prime")
     """
+    if caminho is None:
+        caminho = get_app_path("config.xml")
+    else:
+        caminho = get_app_path(caminho)
     try:
         tree = ET.parse(caminho)
         root = tree.getroot()
@@ -92,11 +125,15 @@ def get_config_value(tag, caminho="config.xml"):
 
 # === auth.xml ===
 
-def get_auth_value(tag, caminho="auth.xml"):
+def get_auth_value(tag, caminho=None):
     """
     Retorna o valor descriptografado de uma tag do auth.xml.
     Exemplo: get_auth_value("email")
     """
+    if caminho is None:
+        caminho = get_app_path("auth.xml")
+    else:
+        caminho = get_app_path(caminho)
     try:
         tree = ET.parse(caminho)
         root = tree.getroot()

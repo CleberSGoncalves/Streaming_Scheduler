@@ -12,7 +12,7 @@ import urllib.request
 import subprocess
 import logging
 
-CURRENT_VERSION = "17.4"
+CURRENT_VERSION = "17.5"
 
 class AutoUpdater:
     def __init__(self, version_url: str = "https://raw.githubusercontent.com/CleberSGoncalves/Streaming_Scheduler/main/version.json"):
@@ -22,8 +22,14 @@ class AutoUpdater:
     def _get_local_version(self) -> str:
         """Obtém versão local de ver.txt se existir, ou o fallback CURRENT_VERSION."""
         try:
-            if os.path.exists("ver.txt"):
-                with open("ver.txt", "r", encoding="utf-8") as f:
+            exe_path = sys.executable
+            if not exe_path.lower().endswith(".exe") or "python" in os.path.basename(exe_path).lower():
+                exe_dir = os.path.dirname(os.path.abspath(__file__))
+            else:
+                exe_dir = os.path.dirname(exe_path)
+            ver_file = os.path.join(exe_dir, "ver.txt")
+            if os.path.exists(ver_file):
+                with open(ver_file, "r", encoding="utf-8") as f:
                     v = f.read().strip()
                     if v:
                         return v
@@ -210,7 +216,8 @@ if exist "{exe_path}" (
     set "_MEIPASS2="
     set "PYTHONHOME="
     set "PYTHONPATH="
-    explorer.exe "{exe_path}"
+    cd /d "{exe_dir}"
+    start "" "{exe_path}"
 ) else (
     echo [AUTO-UPDATE] ERRO: Falha ao substituir executável. Restaurando backup anterior...
     timeout /t 2 /nobreak > NUL
@@ -218,12 +225,13 @@ if exist "{exe_path}" (
     set "_MEIPASS2="
     set "PYTHONHOME="
     set "PYTHONPATH="
+    cd /d "{exe_dir}"
     if exist "{old_exe_path}" (
         copy /y "{old_exe_path}" "{exe_path}" > NUL 2>&1
-        explorer.exe "{exe_path}"
+        start "" "{exe_path}"
     ) else if exist "{new_exe_path}" (
         copy /y "{new_exe_path}" "{exe_path}" > NUL 2>&1
-        explorer.exe "{exe_path}"
+        start "" "{exe_path}"
     )
 )
 

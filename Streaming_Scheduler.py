@@ -21,12 +21,34 @@ global monitoramento_ativo
 last_daily_run = None
 monitoramento_ativo = False
 
+def get_app_dir():
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+APP_DIR = get_app_dir()
+try:
+    os.chdir(APP_DIR)
+except Exception:
+    pass
+
+def get_app_path(rel_path):
+    if not rel_path:
+        return APP_DIR
+    if os.path.isabs(rel_path):
+        return rel_path
+    return os.path.join(APP_DIR, rel_path)
+
+CONFIG_FILE = get_app_path("config.xml")
+AUTH_FILE = get_app_path("auth.xml")
+VER_FILE = get_app_path("ver.txt")
+DATA_CSV_FILE = get_app_path("data.csv")
 
 # ---- Rotating logs ----
 if not logging.getLogger().handlers:
     _fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(filename)s %(lineno)d - %(message)s",
                              datefmt="%Y-%m-%d %H:%M:%S")
-    _rot = RotatingFileHandler("log.txt", maxBytes=5_000_000, backupCount=7, encoding="utf-8")
+    _rot = RotatingFileHandler(get_app_path("log.txt"), maxBytes=5_000_000, backupCount=7, encoding="utf-8")
     _rot.setFormatter(_fmt)
     logging.getLogger().setLevel(logging.INFO)
     logging.getLogger().addHandler(_rot)
@@ -414,6 +436,13 @@ import yt_dlp
 from googleapiclient.discovery import build
 from crypto_utils import criptografar,carregar_env_criptografado,descriptografar,get_config_value,get_auth_value
 import hashlib
+import unicodedata
+
+def camp_to_tag(camp_name: str) -> str:
+    nfkd = unicodedata.normalize('NFKD', str(camp_name))
+    ascii_str = ''.join([c for c in nfkd if not unicodedata.combining(c)])
+    clean = re.sub(r'[^a-zA-Z0-9]+', '_', ascii_str).strip('_').lower()
+    return f"camp_{clean}"
 
 thread_em_execucao = False
 _lock_envio_email = threading.Lock()
@@ -425,13 +454,13 @@ _eventos_iniciados = set()
 
 # Globais de UI (Combobox)
 options_plat = ["Amazon Prime", "Disney", "Cazé TV", "Dazn", "Max", "CBF"]
-checkbox_states_plat = {opt: False for opt in options_plat}
+checkbox_states_plat = {opt: True for opt in options_plat}
 combo_plat = None
 menu_plat = None
 checkbox_vars_plat = {}
 
 options_camp = ["Brasileirão serie A", "Brasileirão serie B", "Copa do Brasil", "Copa do Mundo", "Mundial de Clubes FIFA", "Campeonato Paulista", "CONMEBOL Libertadores", "CONMEBOL Sudamericana"]
-checkbox_states_camp = {opt: False for opt in options_camp}
+checkbox_states_camp = {opt: True for opt in options_camp}
 combo_camp = None
 menu_camp = None
 checkbox_vars_camp = {}
@@ -706,7 +735,7 @@ class App:
         checkbox_vars_plat = {}
 
         for option in options_plat:
-            estado_salvo = checkbox_states_plat.get(option, False)
+            estado_salvo = checkbox_states_plat.get(option, True)
             var = BooleanVar(value=estado_salvo)
             checkbox_vars_plat[option] = var
             menu_plat.add_checkbutton(
@@ -783,14 +812,14 @@ class App:
 
         checkbox_busca = IntVar(value=0) 
         
-        checkbox_BuscaAUto=Checkbutton(tb1,variable=checkbox_busca, command=ao_alterar_somente_relatorio)
-        checkbox_BuscaAUto["bg"] = "#f0f0f0"
+        checkbox_SomenteRelatorio=Checkbutton(tb1,variable=checkbox_busca, command=ao_alterar_somente_relatorio)
+        checkbox_SomenteRelatorio["bg"] = "#f0f0f0"
         ft = tkFont.Font(family='Times',size=10)
-        checkbox_BuscaAUto["font"] = 'Helvetica 8 bold'
-        checkbox_BuscaAUto["fg"] = "black"
-        checkbox_BuscaAUto["justify"] = "center"
-        checkbox_BuscaAUto["text"] = "somente relatorio"
-        checkbox_BuscaAUto.place(x=750,y=95,width=150,height=30)
+        checkbox_SomenteRelatorio["font"] = 'Helvetica 8 bold'
+        checkbox_SomenteRelatorio["fg"] = "black"
+        checkbox_SomenteRelatorio["justify"] = "center"
+        checkbox_SomenteRelatorio["text"] = "somente relatorio"
+        checkbox_SomenteRelatorio.place(x=750,y=95,width=150,height=30)
         # checkbox_Email.select()
         
 
@@ -848,7 +877,8 @@ class App:
         checkbox_vars_camp = {}
 
         for option in options_camp:
-            var = BooleanVar(value=True)  # Inicia marcado por padrão
+            estado_salvo = checkbox_states_camp.get(option, True)
+            var = BooleanVar(value=estado_salvo)
             checkbox_vars_camp[option] = var
             menu_camp.add_checkbutton(
                 label=option,
@@ -861,6 +891,10 @@ class App:
             )
 # Associa o clique do Combobox ao menu
         combo_camp.bind("<Button-1>", lambda e: show_checkbox_menu_camp())
+
+        # Atualiza o texto dos comboboxes com as seleções atuais
+        update_combobox_text_plat()
+        update_combobox_text_camp()
 # Cria o combobox na posição desejada (x=270, y=80)
       
         
@@ -2321,27 +2355,38 @@ def _to_bool(v):
 
 def carrega_config_xml():
     try:
-        dados = ler_arquivo_xml("config.xml")
+        dados = ler_arquivo_xml(CONFIG_FILE)
         if not dados:
+            logging.warning("carrega_config_xml: nenhum dado retornado de config.xml")
             return
 
         # =========================
         # ENTRIES
         # =========================
-        email_entry.delete(0, END)
-        refresh_entry.delete(0, END)
-        entry_email2.delete(0, END)
+        if 'email_entry' in globals() and email_entry:
+            email_entry.delete(0, END)
+            email_entry.insert(END, dados.get("emails", ""))
 
-        email_entry.insert(END, dados.get("emails", ""))
-        refresh_entry.insert(END, dados.get("refresh", ""))
-        entry_email2.insert(END, dados.get("hora_automatico", ""))
+        if 'refresh_entry' in globals() and refresh_entry:
+            refresh_entry.delete(0, END)
+            refresh_entry.insert(END, dados.get("refresh", "20"))
+
+        if 'entry_email2' in globals() and entry_email2:
+            entry_email2.delete(0, END)
+            entry_email2.insert(END, dados.get("hora_automatico", "09:00"))
 
         # =========================
         # CHECKBOXES PRINCIPAIS
         # =========================
-        checkbox_ema.set(1 if _to_bool(dados.get("check_automatico_Email")) else 0)
-        checkbox_grid.set(1 if _to_bool(dados.get("check_automatico_Evento")) else 0)
-        checkbox_busca.set(1 if _to_bool(dados.get("somente_relatorio")) else 0)
+        if 'checkbox_ema' in globals() and checkbox_ema:
+            checkbox_ema.set(1 if _to_bool(dados.get("check_automatico_Email")) else 0)
+
+        if 'checkbox_grid' in globals() and checkbox_grid:
+            checkbox_grid.set(1 if _to_bool(dados.get("check_automatico_Evento")) else 0)
+
+        if 'checkbox_busca' in globals() and checkbox_busca:
+            modo_rel = 1 if _to_bool(dados.get("somente_relatorio")) else 0
+            checkbox_busca.set(modo_rel)
 
         # =========================
         # PLATAFORMAS (XML → UI)
@@ -2356,7 +2401,7 @@ def carrega_config_xml():
         }
 
         for nome_ui, chave_xml in mapa_plataformas.items():
-            ativo = _to_bool(dados.get(chave_xml))
+            ativo = _to_bool(dados.get(chave_xml, False))
             if nome_ui in checkbox_vars_plat:
                 checkbox_vars_plat[nome_ui].set(ativo)
             checkbox_states_plat[nome_ui] = ativo
@@ -2367,8 +2412,11 @@ def carrega_config_xml():
         # CAMPEONATOS (XML → UI)
         # =========================
         camp_saved = dados.get("camp_configs", {})
-        for camp_name, val_str in camp_saved.items():
-            ativo_camp = _to_bool(val_str)
+        for camp_name in options_camp:
+            if camp_name in camp_saved:
+                ativo_camp = _to_bool(camp_saved[camp_name])
+            else:
+                ativo_camp = True
             if camp_name in checkbox_vars_camp:
                 checkbox_vars_camp[camp_name].set(ativo_camp)
             checkbox_states_camp[camp_name] = ativo_camp
@@ -2377,20 +2425,29 @@ def carrega_config_xml():
 
         # Ajusta estado do navegador Direito conforme modo relatório
         ao_alterar_somente_relatorio()
+        logging.info("Configurações carregadas do config.xml e aplicadas com sucesso.")
 
     except Exception as e:
         logging.exception(f"Erro ao carregar config.xml: {e}")
     
-def ler_arquivo_xml(nome_arquivo):
+def ler_arquivo_xml(nome_arquivo=None):
+    if not nome_arquivo:
+        nome_arquivo = CONFIG_FILE
+    elif not os.path.isabs(nome_arquivo):
+        nome_arquivo = get_app_path(nome_arquivo)
+
     try:
+        if not os.path.exists(nome_arquivo):
+            logging.warning(f"Arquivo '{nome_arquivo}' não existe.")
+            return None
+
         # Carregar e analisar o arquivo XML
         tree = ET.parse(nome_arquivo)
         root = tree.getroot()
 
-        # Extrair usuário e senha
         def safe_find(tag, default=""):
             elem = root.find(tag)
-            return elem.text if elem is not None else default
+            return elem.text.strip() if elem is not None and elem.text else default
 
         usuario_prime = descriptografar(safe_find("usuario_prime"))
         senha_prime = descriptografar(safe_find("senha_prime"))
@@ -2401,25 +2458,41 @@ def ler_arquivo_xml(nome_arquivo):
         
         emails = safe_find("emails")
         refresh = safe_find("refresh", "20")
-        hora_automatico = safe_find("hora_automatico", "08:00")
+        hora_automatico = safe_find("hora_automatico", "09:00")
         check_automatico_Email = safe_find("check_automatico_Email", "false")
         check_automatico_Evento = safe_find("check_automatico_Evento", "false")
         somente_relatorio = safe_find("somente_relatorio", "false")
         
         plataforma_dazn = safe_find("plataforma_dazn", "false")
-        plataforma_prime = safe_find("plataforma_prime") or safe_find("plataforma_amazon_prime", "false")
+        
+        el_prime = root.find("plataforma_prime")
+        if el_prime is not None and el_prime.text:
+            plataforma_prime = el_prime.text.strip()
+        else:
+            plataforma_prime = safe_find("plataforma_amazon_prime", "false")
+
         plataforma_disney = safe_find("plataforma_disney", "false")
         plataforma_max = safe_find("plataforma_max", "false")
-        plataforma_caze = safe_find("plataforma_caze") or safe_find("plataforma_caze_tv", "false")
+
+        el_caze = root.find("plataforma_caze")
+        if el_caze is not None and el_caze.text:
+            plataforma_caze = el_caze.text.strip()
+        else:
+            plataforma_caze = safe_find("plataforma_caze_tv", "false")
+
         plataforma_cbf = safe_find("plataforma_cbf", "false")
         
         # Campeonatos
         camp_configs = {}
         for opt in options_camp:
-            tag_name = "camp_" + opt.lower().replace(" ", "_").replace("ã", "a").replace("õ", "o")
-            camp_configs[opt] = safe_find(tag_name, "true")
+            tag_name = camp_to_tag(opt)
+            val = safe_find(tag_name, "")
+            if not val:
+                # Fallback para grafia antiga se houver
+                tag_legada = "camp_" + opt.lower().replace(" ", "_").replace("ã", "a").replace("õ", "o")
+                val = safe_find(tag_legada, "true")
+            camp_configs[opt] = val
 
-        # Retornar os dados como um dicionário
         return {
             "usuario_prime": usuario_prime,
             "senha_prime": senha_prime,
@@ -2442,17 +2515,22 @@ def ler_arquivo_xml(nome_arquivo):
             "camp_configs": camp_configs
         }
     except FileNotFoundError:
-        text=f"Arquivo '{nome_arquivo}' não encontrado."
+        logging.warning(f"Arquivo '{nome_arquivo}' não encontrado.")
         return None
     except ET.ParseError:
-        text="Erro ao analisar o XML. Verifique o formato do arquivo."
+        logging.error("Erro ao analisar o XML. Verifique o formato do arquivo.")
         return None
     except Exception as e: 
-        logging.error(f"Erro ocorrido: {e}")
+        logging.error(f"Erro ocorrido ao ler XML: {e}")
         habilita_botoes()
         return {}
 
-def criar_arquivo_xml(nome_arquivo, emails, refresh, hora_automatico, check_automatico_Email, check_automatico_Evento, somente_relatorio):
+def criar_arquivo_xml(nome_arquivo=None, emails="", refresh="20", hora_automatico="09:00", check_automatico_Email="false", check_automatico_Evento="false", somente_relatorio="false"):
+    if not nome_arquivo:
+        nome_arquivo = CONFIG_FILE
+    elif not os.path.isabs(nome_arquivo):
+        nome_arquivo = get_app_path(nome_arquivo)
+
     # Se o arquivo existir, carregamos
     if os.path.exists(nome_arquivo):
         tree = ET.parse(nome_arquivo)
@@ -2465,7 +2543,7 @@ def criar_arquivo_xml(nome_arquivo, emails, refresh, hora_automatico, check_auto
         elem = root.find(tag)
         if elem is None:
             elem = ET.SubElement(root, tag)
-        elem.text = value
+        elem.text = str(value)
 
     # Atualiza ou cria apenas os campos necessários
     set_tag("emails", emails)
@@ -2488,19 +2566,18 @@ def criar_arquivo_xml(nome_arquivo, emails, refresh, hora_automatico, check_auto
         val = "true" if is_selected_plat(plat) else "false"
         set_tag(chave, val)
 
-    # Limpeza de tags legadas com grafia duplicada
+    # Limpeza completa de tags legadas com grafia duplicada
     for chave_legada in ["plataforma_amazon_prime", "plataforma_caze_tv"]:
-        el = root.find(chave_legada)
-        if el is not None:
+        for el in root.findall(chave_legada):
             root.remove(el)
 
     # Campeonatos
     for opt in options_camp:
-        tag_name = "camp_" + opt.lower().replace(" ", "_").replace("ã", "a").replace("õ", "o")
+        tag_name = camp_to_tag(opt)
         val = "true" if is_selected_camp(opt) else "false"
         set_tag(tag_name, val)
 
-    # Salva no mesmo arquivo
+    # Salva no arquivo
     tree.write(nome_arquivo, encoding="utf-8", xml_declaration=True)
     logging.info(f"Arquivo XML '{nome_arquivo}' atualizado com sucesso!")
 
@@ -2770,19 +2847,18 @@ def load_auth():
     Carrega as credenciais do arquivo auth.xml
     Retorna um dicionário com 'email' e 'senha' ou None se o arquivo não existir
     """
-    cwd = os.path.realpath('.')
-    file = "auth.xml"
-    auth_file = os.path.join(cwd,file)
-  
-    
+    auth_file = AUTH_FILE
     try:
-       
+        if not os.path.exists(auth_file):
+            return None
         tree = ET.parse(auth_file)
         root = tree.getroot()
+        email_elem = root.find('email')
+        senha_elem = root.find('senha')
         return {
-    'email': descriptografar(root.find('email').text),
-    'senha': descriptografar(root.find('senha').text)
-}
+            'email': descriptografar(email_elem.text) if email_elem is not None and email_elem.text else "",
+            'senha': descriptografar(senha_elem.text) if senha_elem is not None and senha_elem.text else ""
+        }
     except Exception as e:
         logging.error(f"Erro ao ler auth.xml: {str(e)}")
         habilita_botoes()
@@ -2797,11 +2873,14 @@ def save_auth(email, senha):
         ET.SubElement(auth, 'email').text = criptografar(email)
         ET.SubElement(auth, 'senha').text = criptografar(senha)
 
-        with open('auth.xml', 'wb') as f:
+        with open(AUTH_FILE, 'wb') as f:
             tree = ET.ElementTree(auth)
             tree.write(f, encoding='utf-8', xml_declaration=True)
 
-        os.chmod('auth.xml', 0o600)  # Segurança em Unix
+        try:
+            os.chmod(AUTH_FILE, 0o600)  # Segurança em Unix
+        except Exception:
+            pass
         return True
     except Exception as e:
         logging.error(f"Erro ao salvar auth.xml: {str(e)}")
@@ -5409,58 +5488,67 @@ def returndatetimeatual():
         return "Atualizado em: " +dia+"/"+mes+"/"+ano+" "+hora+":"+minuto+":"+segundo
 
 def salvar():
-    exportar_para_csv(tree)
+    try:
+        exportar_para_csv(tree)
+    except Exception as ex_csv:
+        logging.warning(f"Aviso ao exportar CSV durante salvar: {ex_csv}")
 
-    estado_ema = ''
-    estado_eventos = ''    
+    try:
+        estado_ema = "true" if checkbox_ema.get() == 1 else "false"
+        estado_eventos = "true" if checkbox_grid.get() == 1 else "false"
+        estado_somente_rel = "true" if checkbox_busca.get() == 1 else "false"
 
-    if checkbox_ema.get() == 1:
-        estado_ema = "true"
-    elif checkbox_ema.get() == 0:
-        estado_ema = "false"
+        # Sincroniza estados das plataformas antes de salvar
+        for plat in options_plat:
+            checkbox_states_plat[plat] = is_selected_plat(plat)
 
-    if checkbox_grid.get() == 1:
-        estado_eventos = "true"
-    elif checkbox_grid.get() == 0:
-        estado_eventos = "false"
+        # Sincroniza estados dos campeonatos antes de salvar
+        for camp in options_camp:
+            checkbox_states_camp[camp] = is_selected_camp(camp)
 
-    estado_somente_rel = "true" if checkbox_busca.get() == 1 else "false"
+        criar_arquivo_xml(
+            CONFIG_FILE,
+            email_entry.get().strip(),
+            refresh_entry.get().strip(),
+            entry_email2.get().strip(),
+            estado_ema,
+            estado_eventos,
+            estado_somente_rel
+        )
 
-    criar_arquivo_xml("config.xml",email_entry.get(),refresh_entry.get(),entry_email2.get(),estado_ema,estado_eventos,estado_somente_rel)
+        update_combobox_text_plat()
+        update_combobox_text_camp()
+        ao_alterar_somente_relatorio()
 
-def exportar_para_csv(treeview, nome_arquivo="data.csv"):
+        if 'label_toolbar' in globals() and label_toolbar:
+            label_toolbar.config(text="Configurações salvas com sucesso!")
+        messagebox.showinfo("Streaming Scheduler", "Configurações salvas com sucesso!")
+    except Exception as e:
+        logging.error(f"Erro ao salvar configurações: {e}")
+        messagebox.showerror("Streaming Scheduler", f"Erro ao salvar configurações:\n{e}")
 
- try:
+def exportar_para_csv(treeview, nome_arquivo=None):
+    if not nome_arquivo:
+        nome_arquivo = DATA_CSV_FILE
+    elif not os.path.isabs(nome_arquivo):
+        nome_arquivo = get_app_path(nome_arquivo)
 
-    """
-    Exporta os dados da Treeview para um arquivo CSV.
-    """
-    dados = treeview.get_children()
-    colunas = treeview["columns"]
-    
-    with open(nome_arquivo, 'w', newline='', encoding='utf-8') as csvfile:
-        csv_writer = csv.writer(csvfile)
+    try:
+        dados = treeview.get_children()
+        colunas = treeview["columns"]
         
-        # Escreve os cabeçalhos
-        csv_writer.writerow(colunas)
-        
-        # Escreve os dados
-        for item in dados:
-            values = treeview.item(item, "values")
-            csv_writer.writerow(values)
-         
-        messagebox.showinfo("Streaming_Scheduler","Dados exportados para:" + (nome_arquivo))
-
- 
- except FileNotFoundError as e:
-  logging.error(f"Arquivo não encontrado = {e}")
- except Exception as e: 
-  logging.error(f"Erro ocorrido: {e}") 
-  exc_type, exc_obj, exc_tb = sys.exc_info()
-  fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-  habilita_botoes()
-  text =f"Streaming Scheduler error: {e}"
-  pass
+        with open(nome_arquivo, 'w', newline='', encoding='utf-8') as csvfile:
+            csv_writer = csv.writer(csvfile)
+            csv_writer.writerow(colunas)
+            for item in dados:
+                values = treeview.item(item, "values")
+                csv_writer.writerow(values)
+             
+        logging.info(f"Dados exportados para: {nome_arquivo}")
+    except FileNotFoundError as e:
+        logging.error(f"Arquivo não encontrado = {e}")
+    except Exception as e: 
+        logging.error(f"Erro ocorrido ao exportar CSV: {e}")
  
 def safe_tree_delete(tree, iid):
     try:
@@ -7188,8 +7276,8 @@ def checar_update():
 
 def obter_versao():
     try:
-        if os.path.exists("ver.txt"):
-            with open("ver.txt", "r", encoding="utf-8") as f:
+        if os.path.exists(VER_FILE):
+            with open(VER_FILE, "r", encoding="utf-8") as f:
                 v = f.read().strip()
                 if v:
                     return v
@@ -7243,9 +7331,7 @@ if __name__ == "__main__":
         load_csv_inicio()
         ajustartodootree()
         
-        time.sleep(3)
-        time.sleep(5)
-        limpar_arquivo_periodicamente("log.txt")
+        limpar_arquivo_periodicamente(get_app_path("log.txt"))
         loadversion()
         root.after(2000, update_command)
 
