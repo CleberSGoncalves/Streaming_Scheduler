@@ -1,0 +1,5 @@
+{
+  "version": "17.3",
+  "download_url": "https://github.com/CleberSGoncalves/Streaming_Scheduler/releases/download/v17.3/Streaming_Scheduler.exe",
+  "changelog": "v17.3: Sistema de Auto-Update Moderno via GitHub Releases (igual Monitor_Esportes); substituição do executável sem afetar config.xml ou auth.xml; verificação automática de novas versões."
+}

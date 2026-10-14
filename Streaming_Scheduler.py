@@ -408,7 +408,8 @@ from email.mime.text import MIMEText
 import schedule
 import pygetwindow as gw
 import xml.etree.ElementTree as ET
-from update import  Update
+from update import Update
+from auto_updater import AutoUpdater, CURRENT_VERSION
 import yt_dlp
 from googleapiclient.discovery import build
 from crypto_utils import criptografar,carregar_env_criptografado,descriptografar,get_config_value,get_auth_value
@@ -7095,150 +7096,106 @@ def impedir_minimizacao(nome_janela):
 atualizacao_em_andamento = False
 
 def checar_update():
-    """Verifica atualização sem travar UI, scheduler ou agendamentos"""
+    """Verifica atualização no GitHub Releases (mesmo padrão seguro do Monitor_Esportes)."""
     global atualizacao_em_andamento
 
     if atualizacao_em_andamento:
         return
 
     atualizacao_em_andamento = True
-    label_toolbar.config(text="🔍 Verificando atualizações...")
+    label_toolbar.config(text="🔍 Verificando atualizações no GitHub...")
 
     def worker():
-        nonlocal updater, nova_versao
         try:
-            updater = Update(
-                label=None,  # ❌ nunca UI em thread
-                sftp_host="sftp.kantaribopemedia.com",
-                sftp_user="suportemdna",
-                sftp_pass="Kafjtwev2018MO@",
-                remote_path="suportemdna/Streaming_Scheduller",
-                version_file="version.txt",
-                update_file="update.zip",
-                local_version_file="ver.txt",
-                app_exe="Streaming_Scheduler.exe",
-            )
+            updater = AutoUpdater()
+            has_update, remote_ver, download_url, changelog = updater.check_for_update()
 
-            tem_update = updater.verificar_atualizacao()
-
-            if not tem_update:
-                root.after(0, lambda: finalizar("✅ Sistema atualizado"))
+            if not has_update:
+                root.after(0, lambda: finalizar(f"✅ Sistema atualizado (v{updater.current_version})"))
                 return
 
-            with open("version.txt", "r") as f:
-                nova_versao = f.read().strip()
-
-            root.after(0, mostrar_dialogo)
+            root.after(0, lambda: mostrar_dialogo(updater, remote_ver, download_url, changelog))
 
         except Exception as e:
-            logging.error(f"❌ Erro no update: {e}", exc_info=True)
+            logging.error(f"❌ Erro ao verificar atualização no GitHub: {e}", exc_info=True)
             root.after(0, lambda: finalizar("❌ Falha ao verificar atualização"))
 
-    def mostrar_dialogo():
+    def mostrar_dialogo(updater, remote_ver, download_url, changelog):
         dialog = Toplevel(root)
-        dialog.title("Atualização Disponível")
+        dialog.title("Atualização Disponível - GitHub Releases")
         dialog.resizable(False, False)
         dialog.grab_set()
 
-        dialog_width = 300
-        dialog_height = 150
+        dialog_width = 380
+        dialog_height = 200
         pos_x = root.winfo_x() + (root.winfo_width() // 2) - (dialog_width // 2)
         pos_y = root.winfo_y() + (root.winfo_height() // 2) - (dialog_height // 2)
         dialog.geometry(f"{dialog_width}x{dialog_height}+{pos_x}+{pos_y}")
 
         Label(
             dialog,
-            text=f"Versão {nova_versao} disponível!",
-            font=("Arial", 10, "bold"),
-            pady=10
+            text=f"🚀 Nova Versão {remote_ver} Disponível!",
+            font=("Arial", 11, "bold"),
+            fg="#0066cc",
+            pady=8
         ).pack()
 
-        Label(dialog, text="Deseja instalar agora?").pack(pady=5)
+        Label(dialog, text=f"Versão Instalada: v{updater.current_version}\n\nChangelog:\n{changelog[:150]}", font=("Arial", 8), wraplength=350, justify=CENTER).pack(pady=4)
+
+        lbl_status_dlg = Label(dialog, text="Deseja atualizar agora?", font=("Arial", 9, "bold"))
+        lbl_status_dlg.pack(pady=5)
+
+        btn_frame = Frame(dialog)
+        btn_frame.pack(pady=10)
 
         def confirmar():
-            dialog.destroy()
-            iniciar_instalacao()
+            for widget in btn_frame.winfo_children():
+                widget.config(state=DISABLED)
+            lbl_status_dlg.config(text="📥 Baixando executável do GitHub...")
+            label_toolbar.config(text=f"📥 Baixando v{remote_ver} do GitHub...")
+            
+            def run_download():
+                try:
+                    def progress_cb(pct):
+                        txt = f"📥 Baixando: {pct}%" if isinstance(pct, int) else f"📥 Baixando: {pct}"
+                        root.after(0, lambda: label_toolbar.config(text=txt))
+                        root.after(0, lambda: lbl_status_dlg.config(text=txt))
+
+                    # Salva configurações locais antes do swap
+                    salvar()
+                    updater.perform_update_and_restart(download_url, remote_version=remote_ver, progress_callback=progress_cb)
+                except Exception as ex_down:
+                    logging.error(f"❌ Erro durante o download do update: {ex_down}", exc_info=True)
+                    root.after(0, lambda: dialog.destroy())
+                    root.after(0, lambda: finalizar(f"❌ Erro no update: {ex_down}"))
+
+            threading.Thread(target=run_download, daemon=True).start()
 
         def cancelar():
             dialog.destroy()
             finalizar("Atualização cancelada")
 
-        Button(dialog, text="Sim", width=8, command=confirmar).pack(side=LEFT, padx=20, pady=10)
-        Button(dialog, text="Não", width=8, command=cancelar).pack(side=RIGHT, padx=20, pady=10)
-
-    def iniciar_instalacao():
-        try:
-            label_toolbar.config(text="🛠 Preparando atualização...")
-
-            if not updater.preparar_atualizacao():
-                raise Exception("Falha ao preparar atualização")
-
-            label_toolbar.config(text="💾 Salvando configurações...")
-            salvar()
-
-            def countdown(i=3):
-                if i == 0:
-                    executar_update()
-                    return
-                label_toolbar.config(text=f"🔄 Reiniciando em {i}s...")
-                root.after(1000, lambda: countdown(i - 1))
-
-            countdown()
-
-        except Exception as e:
-            logging.error(f"❌ Erro ao instalar update: {e}", exc_info=True)
-            finalizar("❌ Falha ao instalar atualização")
-
-    def executar_update():
-        try:
-            if platform.system() == "Windows":
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-
-                subprocess.Popen(
-                    "update.bat",
-                    shell=True,
-                    startupinfo=startupinfo,
-                    creationflags=subprocess.CREATE_NEW_CONSOLE
-                )
-                root.destroy()
-                sys.exit(0)
-        except Exception as e:
-            logging.error(f"❌ Falha ao executar update.bat: {e}", exc_info=True)
-            finalizar("❌ Erro ao reiniciar")
+        Button(btn_frame, text="Atualizar Agora", width=14, bg="#2e7d32", fg="white", font=("Arial", 9, "bold"), command=confirmar).pack(side=LEFT, padx=10)
+        Button(btn_frame, text="Cancelar", width=10, command=cancelar).pack(side=RIGHT, padx=10)
 
     def finalizar(msg):
         global atualizacao_em_andamento
         label_toolbar.config(text=msg)
         atualizacao_em_andamento = False
 
-        # limpeza segura
-        for temp_file in ("version.txt", "update.zip", "update.bat"):
-            if os.path.exists(temp_file):
-                try:
-                    os.remove(temp_file)
-                except:
-                    pass
-
-    updater = None
-    nova_versao = ""
-
     threading.Thread(target=worker, daemon=True).start()
     
 
 def obter_versao():
     try:
-        result = ""
-
-        with open("ver.txt", "r") as f:
-            result =  f.read().strip()  # Lê e remove espaços extras
-     
-
-        return result
-
-
-    except FileNotFoundError:
-        return "Arquivo não encontrado"
+        if os.path.exists("ver.txt"):
+            with open("ver.txt", "r", encoding="utf-8") as f:
+                v = f.read().strip()
+                if v:
+                    return v
+        return CURRENT_VERSION
+    except Exception:
+        return CURRENT_VERSION
     
 def checa_botao_start(get_botao_func):
     thread = threading.Thread(target=verificar_e_clicar, args=(get_botao_func,))
