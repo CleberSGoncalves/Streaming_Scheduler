@@ -12,7 +12,7 @@ import urllib.request
 import subprocess
 import logging
 
-CURRENT_VERSION = "17.3"
+CURRENT_VERSION = "17.4"
 
 class AutoUpdater:
     def __init__(self, version_url: str = "https://raw.githubusercontent.com/CleberSGoncalves/Streaming_Scheduler/main/version.json"):

@@ -5,15 +5,15 @@ import urllib.request
 import subprocess
 
 CWD = r"e:\desenvolvimento\Streaming_Scheduler"
-TAG = "v17.3"
 
 # Lê dados de version.json
 ver_json_path = os.path.join(CWD, "version.json")
 with open(ver_json_path, "r", encoding="utf-8") as f:
     ver_data = json.load(f)
 
-ver_num = ver_data.get("version", "17.3")
-changelog = ver_data.get("changelog", "Atualização Streaming Scheduler")
+ver_num = str(ver_data.get("version", "17.4")).strip()
+TAG = f"v{ver_num}" if not ver_num.startswith("v") else ver_num
+changelog = ver_data.get("changelog", f"Versão {TAG} do Streaming Scheduler")
 
 print(f"[1/5] Compilando executável {TAG} com PyInstaller...")
 res_build = subprocess.run(["pyinstaller", "Streaming_Scheduler.spec", "--noconfirm"], cwd=CWD)
