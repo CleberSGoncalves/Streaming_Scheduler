@@ -705,7 +705,8 @@ class App:
         checkbox_vars_plat = {}
 
         for option in options_plat:
-            var = BooleanVar(value=False)  # ou False, se quiser todos desmarcados inicialmente
+            estado_salvo = checkbox_states_plat.get(option, False)
+            var = BooleanVar(value=estado_salvo)
             checkbox_vars_plat[option] = var
             menu_plat.add_checkbutton(
                 label=option,
@@ -2525,15 +2526,23 @@ def validar_hora_minuto(texto):
 
 
 def tarefa_diaria():
-    global thread_em_execucao, _ultimo_agendamento_data, _ultima_janela_envio
+    global thread_em_execucao, _ultimo_agendamento_data
     if thread_em_execucao:
         logging.info("[INFO] Já está em execução. Ignorado.")
         return
     thread_em_execucao = True
     _ultimo_agendamento_data = datetime.now().date()
-    _ultima_janela_envio = datetime.now()
     try:
-        
+        # Atualiza a data da busca para o dia corrente automaticamente
+        try:
+            hoje_str = datetime.now().strftime("%d/%m/%Y")
+            if 'entry_data' in globals() and entry_data:
+                entry_data.delete(0, END)
+                entry_data.insert(0, hoje_str)
+                logging.info(f"[AGENDADO] Data da busca atualizada para hoje: {hoje_str}")
+        except Exception as e_dt:
+            logging.warning(f"[AGENDADO] Não foi possível atualizar entry_data: {e_dt}")
+
         # =====================================================
         # MODO SOMENTE RELATORIO
         # =====================================================
@@ -6129,7 +6138,6 @@ def run_app():
              if agora >= alvo_hoje and _ultimo_agendamento_data != agora.date():
                  logging.info(f"[AGENDADO] Horário atingido ({hora_cfg}). Executando tarefa_diaria em segundo plano...")
                  _ultimo_agendamento_data = agora.date()
-                 _ultima_janela_envio = agora
                  threading.Thread(target=tarefa_diaria).start()
                  return
          except ValueError:
