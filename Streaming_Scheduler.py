@@ -1555,12 +1555,13 @@ def criar_aba_erros(notebook):
             messagebox.showerror("Erro de Formato", "As datas devem estar no formato dd/mm/yyyy")
             return
 
-        if not os.path.exists("log.txt"):
+        log_file = get_app_path("log.txt")
+        if not os.path.exists(log_file):
             messagebox.showinfo("Arquivo Não Encontrado", "O arquivo 'log.txt' não foi encontrado.")
             return
 
         try:
-            with open("log.txt", "r", encoding="latin-1") as f:
+            with open(log_file, "r", encoding="utf-8", errors="replace") as f:
                 linhas_processadas = []
 
                 for linha in f:
@@ -1598,8 +1599,9 @@ def criar_aba_erros(notebook):
             messagebox.showerror("Erro ao Ler Log", f"Ocorreu um erro ao ler o arquivo de log:\n{str(e)}")
 
     def limpar_logs():
-        if os.path.exists("log.txt"):
-            with open("log.txt", "w") as f:
+        log_file = get_app_path("log.txt")
+        if os.path.exists(log_file):
+            with open(log_file, "w", encoding="utf-8") as f:
                 f.write("")
             aplicar_filtro()
             messagebox.showinfo("Limpar Logs", "O arquivo de log foi limpo com sucesso.")
@@ -1611,7 +1613,7 @@ def criar_aba_erros(notebook):
             messagebox.showwarning("Aviso", "Nenhum erro para exportar.")
             return
         try:
-            with open("erros_exportados.csv", "w", newline='', encoding="utf-8") as f:
+            with open(get_app_path("erros_exportados.csv"), "w", newline='', encoding="utf-8") as f:
                 writer = csv.writer(f)
                 writer.writerow(["Data/Hora", "Tipo", "Linha", "Mensagem"])
                 for item in tree_log.get_children():
@@ -2645,17 +2647,26 @@ def tarefa_diaria():
             limpar_treeview()
             run_busca_eventos(ignorar_trava=True)
 
-        # Envia relatório com o que houver na grade
+        # Envia relatório por e-mail com o que houver na grade
         if checkbox_ema.get():
             if tree.get_children():
-                enviar_email()
-                preencher_sharepoint()
+                try:
+                    enviar_email()
+                except Exception as e_mail:
+                    logging.error(f"[EMAIL] Erro no envio agendado: {e_mail}")
             else:
                 logging.warning("Tentativa de envio de e-mail sem dados no treeview")
                 try:
                     label_toolbar.config(text="Nenhum dado encontrado para enviar.")
                 except Exception:
                     pass
+
+        # Atualiza o SharePoint de forma independente da flag de e-mail
+        if tree.get_children():
+            try:
+                preencher_sharepoint()
+            except Exception as e_sp:
+                logging.error(f"[SharePoint] Erro ao sincronizar com SharePoint na tarefa diária: {e_sp}")
     except Exception as e:
         logging.error(f"Erro em tarefa_diaria: {str(e)}", exc_info=True)
     finally:
@@ -2891,6 +2902,55 @@ def save_auth(email, senha):
 def _hash_corpo(corpo: str) -> str:
     return hashlib.sha256(corpo.encode("utf-8", errors="ignore")).hexdigest()
 
+def _conectar_e_enviar_smtp(remetente, senha, destinatarios, msg_string, timeout=30):
+    """
+    Envia e-mail via SMTP com alta resiliência e failover automático:
+    1. Estratégia A: Port 587 (STARTTLS com EHLO explícito antes e depois do TLS)
+    2. Estratégia B: Port 465 (SSL direto via smtplib.SMTP_SSL)
+    3. Loop com até 3 tentativas e fallback automático entre portas 587 e 465
+    """
+    import smtplib
+    import ssl
+    import socket
+
+    ultimo_erro = None
+    estrategias = [
+        {"nome": "Port 587 (STARTTLS)", "use_ssl": False, "port": 587},
+        {"nome": "Port 465 (SSL Direto)", "use_ssl": True, "port": 465},
+    ]
+
+    for tentativa in range(1, 4):
+        for est in estrategias:
+            try:
+                logging.info(f"[SMTP] Tentando envio (tentativa {tentativa}/3) via {est['nome']}...")
+                ctx = ssl.create_default_context()
+                if est["use_ssl"]:
+                    with smtplib.SMTP_SSL("smtp.gmail.com", est["port"], timeout=timeout, context=ctx) as servidor:
+                        servidor.ehlo()
+                        servidor.login(remetente, senha)
+                        refusals = servidor.sendmail(remetente, destinatarios, msg_string)
+                        if refusals:
+                            logging.warning(f"[SMTP] Destinatários com recusa parcial: {refusals}")
+                        logging.info(f"[SMTP] E-mail enviado com sucesso via {est['nome']}!")
+                        return True
+                else:
+                    with smtplib.SMTP("smtp.gmail.com", est["port"], timeout=timeout) as servidor:
+                        servidor.ehlo()
+                        servidor.starttls(context=ctx)
+                        servidor.ehlo()
+                        servidor.login(remetente, senha)
+                        refusals = servidor.sendmail(remetente, destinatarios, msg_string)
+                        if refusals:
+                            logging.warning(f"[SMTP] Destinatários com recusa parcial: {refusals}")
+                        logging.info(f"[SMTP] E-mail enviado com sucesso via {est['nome']}!")
+                        return True
+            except (smtplib.SMTPException, OSError, TimeoutError, ssl.SSLError) as e:
+                ultimo_erro = e
+                logging.warning(f"[SMTP] Falha via {est['nome']} na tentativa {tentativa}/3: {e}")
+                time.sleep(2)
+
+    raise ultimo_erro
+
 def enviar_email(forcar: bool = False):
     """
     Envia o e-mail com o conteúdo do Treeview.
@@ -2986,14 +3046,19 @@ def enviar_email(forcar: bool = False):
         # - Automático: envia somente se a flag da UI (checkbox_ema) estiver ligada.
         if forcar or checkbox_ema.get():
             try:
-                with smtplib.SMTP(config["smtp_server"], config["smtp_port"], timeout=config["timeout"]) as servidor:
-                    servidor.starttls()
-                    servidor.login(config["remetente"], config["senha"])
-                    servidor.sendmail(config["remetente"], destinatarios, msg.as_string())
-            except smtplib.SMTPException as e:
+                _conectar_e_enviar_smtp(
+                    remetente=config["remetente"],
+                    senha=config["senha"],
+                    destinatarios=destinatarios,
+                    msg_string=msg.as_string(),
+                    timeout=config["timeout"]
+                )
+            except Exception as e:
                 logging.error(f"Erro SMTP ao enviar e-mail: {e}")
-                
-                label_toolbar.config(text=f"Erro SMTP ao enviar e-mail: {e}")
+                try:
+                    label_toolbar.config(text=f"Erro SMTP ao enviar e-mail: {e}")
+                except Exception:
+                    pass
                 return
         else:
             # Automático desativado — não envia e apenas informa

@@ -1,5 +1,5 @@
 {
-  "version": "17.5",
-  "download_url": "https://github.com/CleberSGoncalves/Streaming_Scheduler/releases/download/v17.5/Streaming_Scheduler.exe",
-  "changelog": "v17.5: Correção definitiva da persistência de configurações (plataformas, campeonatos, modo somente relatório e agendamento) e resolução resiliente de diretório da aplicação."
+  "version": "17.6",
+  "download_url": "https://github.com/CleberSGoncalves/Streaming_Scheduler/releases/download/v17.6/Streaming_Scheduler.exe",
+  "changelog": "v17.6: Correcao definitiva do envio de e-mail SMTP (suporte com failover automatico entre porta 587 STARTTLS com EHLO e porta 465 SSL direto, retentativas automaticas) e correcao do visualizador de logs UTF-8."
 }
