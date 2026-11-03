@@ -1,26 +1,30 @@
+# -*- coding: utf-8 -*-
 import os
 import sys
 import json
-import urllib.request
 import subprocess
+import requests
 
 CWD = r"e:\desenvolvimento\Streaming_Scheduler"
 
-# Lê dados de version.json
 ver_json_path = os.path.join(CWD, "version.json")
 with open(ver_json_path, "r", encoding="utf-8") as f:
     ver_data = json.load(f)
 
-ver_num = str(ver_data.get("version", "17.4")).strip()
+ver_num = str(ver_data.get("version", "17.7")).strip()
 TAG = f"v{ver_num}" if not ver_num.startswith("v") else ver_num
 changelog = ver_data.get("changelog", f"Versão {TAG} do Streaming Scheduler")
 
-print(f"[1/5] Compilando executável {TAG} com PyInstaller...")
-res_build = subprocess.run(["pyinstaller", "Streaming_Scheduler.spec", "--noconfirm"], cwd=CWD)
-if res_build.returncode != 0:
-    print("[ERRO FATAL] Falha na compilação do PyInstaller.")
-    sys.exit(1)
-print(f"[SUCESSO] Compilação {TAG} concluída!")
+EXE_PATH = os.path.join(CWD, "dist", "Streaming_Scheduler.exe")
+if not os.path.exists(EXE_PATH):
+    print(f"[1/5] Compilando executável {TAG} com PyInstaller...")
+    res_build = subprocess.run(["pyinstaller", "Streaming_Scheduler.spec", "--noconfirm"], cwd=CWD)
+    if res_build.returncode != 0:
+        print("[ERRO FATAL] Falha na compilação do PyInstaller.")
+        sys.exit(1)
+    print(f"[SUCESSO] Compilação {TAG} concluída!")
+else:
+    print(f"[1/5] Executável {TAG} já compilado e presente em dist ({os.path.getsize(EXE_PATH)/(1024*1024):.1f} MB).")
 
 print("[2/5] Commit e Push para o GitHub...")
 subprocess.run(["git", "add", "."], cwd=CWD)
@@ -49,38 +53,34 @@ headers = {
 
 OWNER = "CleberSGoncalves"
 REPO = "Streaming_Scheduler"
-EXE_PATH = os.path.join(CWD, "dist", "Streaming_Scheduler.exe")
 
 print(f"[3/5] Buscando ou Criando Release {TAG} no GitHub...")
 url_get = f"https://api.github.com/repos/{OWNER}/{REPO}/releases/tags/{TAG}"
-req_get = urllib.request.Request(url_get, headers=headers)
 
 rel_data = None
-try:
-    with urllib.request.urlopen(req_get) as resp:
-        rel_data = json.loads(resp.read().decode("utf-8"))
-        print(f"[RELEASE EXISTENTE] ID: {rel_data['id']}")
-except urllib.error.HTTPError as e:
-    if e.code == 404:
-        print(f"[RELEASE CRIANDO] Tag {TAG}...")
-        url_create = f"https://api.github.com/repos/{OWNER}/{REPO}/releases"
-        payload = {
-            "tag_name": TAG,
-            "target_commitish": "main",
-            "name": f"{TAG} - Sistema de Atualização GitHub Releases",
-            "body": changelog,
-            "draft": False,
-            "prerelease": False
-        }
-        req_c = urllib.request.Request(url_create, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-        try:
-            with urllib.request.urlopen(req_c) as resp_c:
-                rel_data = json.loads(resp_c.read().decode("utf-8"))
-                print(f"[RELEASE CRIADA] ID: {rel_data['id']}")
-        except Exception as e_c:
-            print(f"[ERRO CRIAR] {e_c}")
+resp_get = requests.get(url_get, headers=headers, verify=False, timeout=30)
+if resp_get.status_code == 200:
+    rel_data = resp_get.json()
+    print(f"[RELEASE EXISTENTE] ID: {rel_data['id']}")
+elif resp_get.status_code == 404:
+    print(f"[RELEASE CRIANDO] Tag {TAG}...")
+    url_create = f"https://api.github.com/repos/{OWNER}/{REPO}/releases"
+    payload = {
+        "tag_name": TAG,
+        "target_commitish": "main",
+        "name": f"{TAG} - Sistema de Atualização GitHub Releases",
+        "body": changelog,
+        "draft": False,
+        "prerelease": False
+    }
+    resp_c = requests.post(url_create, json=payload, headers=headers, verify=False, timeout=30)
+    if resp_c.status_code in (200, 201):
+        rel_data = resp_c.json()
+        print(f"[RELEASE CRIADA] ID: {rel_data['id']}")
     else:
-        print(f"[ERRO GET] {e.code}")
+        print(f"[ERRO CRIAR RELEASE] {resp_c.status_code}: {resp_c.text}")
+else:
+    print(f"[ERRO GET RELEASE] {resp_get.status_code}: {resp_get.text}")
 
 if not rel_data:
     print(f"[ERRO FATAL] Não foi possível obter ou criar a release {TAG}.")
@@ -90,12 +90,9 @@ print("[4/5] Deletando asset antigo se existir...")
 for asset in rel_data.get("assets", []):
     if asset["name"] == "Streaming_Scheduler.exe":
         print(f"[DELETANDO ASSET ANTIGO] ID: {asset['id']}")
-        req_d = urllib.request.Request(f"https://api.github.com/repos/{OWNER}/{REPO}/releases/assets/{asset['id']}", headers=headers, method="DELETE")
-        try:
-            urllib.request.urlopen(req_d)
-            print("[SUCESSO] Asset antigo deletado!")
-        except Exception as e_d:
-            print(f"[AVISO DELETAR] {e_d}")
+        url_d = f"https://api.github.com/repos/{OWNER}/{REPO}/releases/assets/{asset['id']}"
+        resp_d = requests.delete(url_d, headers=headers, verify=False, timeout=30)
+        print(f"[STATUS DELETAR] {resp_d.status_code}")
 
 print(f"[5/5] Upload do novo executável {TAG} ({os.path.getsize(EXE_PATH) / (1024*1024):.1f} MB)...")
 upload_url_template = rel_data.get("upload_url", "")
@@ -104,13 +101,13 @@ file_size = os.path.getsize(EXE_PATH)
 
 headers_up = dict(headers)
 headers_up["Content-Type"] = "application/octet-stream"
-headers_up["Content-Length"] = str(file_size)
 
 with open(EXE_PATH, "rb") as f:
-    binary_data = f.read()
+    resp_up = requests.post(upload_url, data=f, headers=headers_up, verify=False, timeout=180)
 
-req_up = urllib.request.Request(upload_url, data=binary_data, headers=headers_up, method="POST")
-with urllib.request.urlopen(req_up) as resp_up:
-    up_res = json.loads(resp_up.read().decode("utf-8"))
-    print(f"\n[EXECUTAVEL {TAG} PUBLICADO COM SUCESSO!]")
+if resp_up.status_code in (200, 201):
+    up_res = resp_up.json()
+    print(f"\n[EXECUTÁVEL {TAG} PUBLICADO COM SUCESSO!]")
     print(f"URL Direct Download: {up_res.get('browser_download_url')}")
+else:
+    print(f"[ERRO NO UPLOAD] {resp_up.status_code}: {resp_up.text}")
