@@ -1,5 +1,5 @@
 {
-  "version": "17.6",
-  "download_url": "https://github.com/CleberSGoncalves/Streaming_Scheduler/releases/download/v17.6/Streaming_Scheduler.exe",
-  "changelog": "v17.6: Correcao definitiva do envio de e-mail SMTP (suporte com failover automatico entre porta 587 STARTTLS com EHLO e porta 465 SSL direto, retentativas automaticas) e correcao do visualizador de logs UTF-8."
+  "version": "17.7",
+  "download_url": "https://github.com/CleberSGoncalves/Streaming_Scheduler/releases/download/v17.7/Streaming_Scheduler.exe",
+  "changelog": "v17.7: Nova aba 'Canais YouTube' para monitoramento de canais (Gaúcha, Baldasso TV, Bagé TV, Atlântida TV, Esporte Band RS), validação automática contra a tabela oficial da CBF (Brasileirão e Copa do Brasil) e publicação no SharePoint."
 }
