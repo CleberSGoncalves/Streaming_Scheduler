@@ -2247,7 +2247,12 @@ def criar_aba_youtube_channels(notebook):
                 padronizar_nomes_grid(tree)
                 remover_duplicatas(tree)
                 ajustartodootree()
-                messagebox.showinfo("Busca Concluída", "Busca dos canais do YouTube concluída com sucesso! Os eventos válidos pela CBF foram adicionados ao grid.")
+                
+                # Publicação imediata no SharePoint
+                logging.info("[YouTube Canais] Sincronizando eventos validados com o SharePoint...")
+                preencher_sharepoint()
+                
+                messagebox.showinfo("Busca e Publicação Concluídas", "Busca dos canais do YouTube e sincronização com o SharePoint concluídas com sucesso!")
             except Exception as ex:
                 logging.error(f"[YouTube Canais] Erro na busca manual: {ex}")
                 messagebox.showerror("Erro", f"Erro na busca dos canais: {ex}")
@@ -2407,7 +2412,7 @@ def parse_youtube_title(raw_title: str, raw_desc: str = ""):
             m = COPA_MUNDO_RE.search(tok)
             if m:
                 is_copa_mundo = True
-                year = m.group(2) if m.lastindex >= 2 else "2026"
+                year = m.group(2) if (m.lastindex and m.lastindex >= 2) else "2026"
                 break
 
     # =========================
@@ -2471,7 +2476,7 @@ def parse_youtube_title(raw_title: str, raw_desc: str = ""):
             m = COPA_MUNDO_RE.search(d)
             if m:
                 is_copa_mundo = True
-                year = m.group(2) if m.lastindex >= 2 else "2026"
+                year = m.group(2) if (m.lastindex and m.lastindex >= 2) else "2026"
 
         if not is_paulista and not is_brasileirao and not is_copa_mundo:
             m = PAULISTA_RE.search(d)
@@ -3460,6 +3465,17 @@ def enviar_email(forcar: bool = False):
 
     try:
         agora = datetime.now()
+
+        # 🛑 Bloqueio estrito de e-mail na madrugada (22:00 às 07:00) para envios automáticos
+        if not forcar:
+            hora_atual = agora.hour
+            if hora_atual < 7 or hora_atual >= 22:
+                logging.info(f"[EMAIL BLOQUEADO NA MADRUGADA] Horário atual ({agora.strftime('%H:%M')}) fora do horário comercial (07:00 às 22:00). Envio automático cancelado.")
+                try:
+                    label_toolbar.config(text="Envio automático cancelado (bloqueio de e-mail na madrugada).")
+                except Exception:
+                    pass
+                return
 
         # Validação de destinatários
         try:
@@ -5939,6 +5955,14 @@ def run_busca_eventos(ignorar_trava=False):
         padronizar_nomes_grid(tree)
         remover_duplicatas(tree)
         ajustartodootree()
+
+        # Publicação automática no SharePoint ao término da busca completa
+        if tree.get_children():
+            try:
+                logging.info("[Busca Eventos] Sincronizando eventos com o SharePoint...")
+                preencher_sharepoint()
+            except Exception as e_sp_busca:
+                logging.error(f"[Busca Eventos] Erro ao sincronizar SharePoint: {e_sp_busca}")
     
     except Exception as e:
         logging.error(f"Erro em run_busca_eventos: {e}")

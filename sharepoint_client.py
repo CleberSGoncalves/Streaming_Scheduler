@@ -436,11 +436,12 @@ def _obter_site_e_lista_ids(headers: Dict[str, str]) -> Tuple[str, str]:
         return DEFAULT_SITE_ID, DEFAULT_LIST_ID
 
 
-def _carregar_eventos_existentes(headers: Dict[str, str], site_id: str, list_id: str) -> Tuple[set, set, set]:
-    """Carrega os eventos existentes no SharePoint para desduplicação imediata."""
+def _carregar_eventos_existentes(headers: Dict[str, str], site_id: str, list_id: str) -> Tuple[set, set, set, dict]:
+    """Carrega os eventos existentes no SharePoint para desduplicação imediata e mapeamento de itens."""
     existing_chaves = set()
     existing_tuples = set()
     existing_match_dates = set()
+    existing_items_map = {}
 
     url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists/{list_id}/items?expand=fields&$top=100"
     page_count = 0
@@ -474,6 +475,13 @@ def _carregar_eventos_existentes(headers: Dict[str, str], site_id: str, list_id:
                     existing_tuples.add((c_val, p_val, d_raw, h_val))
                 if p_tuple != ("",) and d_raw:
                     existing_match_dates.add((p_tuple, d_raw))
+                    canais_existentes = f.get("Transmiss_x00e3_o") or []
+                    if isinstance(canais_existentes, str):
+                        canais_existentes = [canais_existentes]
+                    existing_items_map[(p_tuple, d_raw)] = {
+                        "id": item.get("id"),
+                        "transmissoes": list(canais_existentes)
+                    }
 
             url = data.get("@odata.nextLink")
         except Exception as e:
@@ -481,7 +489,7 @@ def _carregar_eventos_existentes(headers: Dict[str, str], site_id: str, list_id:
             break
 
     logger.info(f"[SharePoint Direct] Indexados: {len(existing_chaves)} chaves, {len(existing_match_dates)} confrontos existentes.")
-    return existing_chaves, existing_tuples, existing_match_dates
+    return existing_chaves, existing_tuples, existing_match_dates, existing_items_map
 
 
 def _post_to_sharepoint_direct(events: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -497,7 +505,7 @@ def _post_to_sharepoint_direct(events: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     site_id, list_id = _obter_site_e_lista_ids(headers)
 
-    existing_chaves, existing_tuples, existing_match_dates = _carregar_eventos_existentes(headers, site_id, list_id)
+    existing_chaves, existing_tuples, existing_match_dates, existing_items_map = _carregar_eventos_existentes(headers, site_id, list_id)
 
     inserted_count = 0
     skipped_count = 0
@@ -526,18 +534,43 @@ def _post_to_sharepoint_direct(events: List[Dict[str, Any]]) -> Dict[str, Any]:
             p_tuple = _deep_normalize_partida(part)
             tuple_check = (_normalizar_campeonato(camp), _normalizar_texto(part), d_short, hora)
 
-            # Verificação de duplicidade:
-            # 1. Chave exata
-            # 2. Tupla exata
-            # 3. Confronto idêntico na mesma data ou +/- 1 dia (independente de hora ou prefixo de campeonato)
-            is_dup = (
-                chave in existing_chaves or
-                tuple_check in existing_tuples or
-                _is_match_duplicate(p_tuple, d_short, existing_match_dates)
-            )
+            canais_novos = _mapear_canal(canal_raw)
+            match_key = (p_tuple, d_short)
 
-            if is_dup:
-                logger.info(f"[SharePoint Direct] Jogo '{part}' ({d_short}) já existe no SharePoint (duplicata evitada). Ignorado.")
+            # Caso o confronto já exista no SharePoint para esta data:
+            if match_key in existing_items_map:
+                item_info = existing_items_map[match_key]
+                canais_atuais = item_info.get("transmissoes") or []
+                if isinstance(canais_atuais, str):
+                    canais_atuais = [canais_atuais]
+                
+                novos_faltantes = [c for c in canais_novos if c not in canais_atuais]
+                if novos_faltantes:
+                    canais_combinados = list(dict.fromkeys(canais_atuais + novos_faltantes))
+                    patch_fields = {
+                        "Transmiss_x00e3_o@odata.type": "Collection(Edm.String)",
+                        "Transmiss_x00e3_o": canais_combinados
+                    }
+                    r_patch = _graph_request(
+                        "PATCH",
+                        f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists/{list_id}/items/{item_info['id']}/fields",
+                        headers=headers,
+                        json_payload=patch_fields,
+                        timeout=30
+                    )
+                    if r_patch and r_patch.status_code in (200, 201, 204):
+                        inserted_count += 1
+                        item_info["transmissoes"] = canais_combinados
+                        logger.info(f"[SharePoint Direct] Canal '{canal_raw}' adicionado com sucesso à transmissão de '{part}' ({d_short}) no SharePoint!")
+                        continue
+                    else:
+                        logger.warning(f"[SharePoint Direct] Falha ao atualizar canal no item {item_info['id']}: {r_patch.status_code if r_patch else 'sem resposta'}")
+                else:
+                    logger.info(f"[SharePoint Direct] Jogo '{part}' ({d_short}) já possui o canal '{canal_raw}' registrado no SharePoint. Ignorado.")
+                    skipped_count += 1
+                    continue
+            elif chave in existing_chaves or tuple_check in existing_tuples:
+                logger.info(f"[SharePoint Direct] Jogo '{part}' ({d_short}) já existe por chave única no SharePoint. Ignorado.")
                 skipped_count += 1
                 continue
 
