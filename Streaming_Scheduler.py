@@ -997,6 +997,7 @@ class App:
         
         criar_aba_acessos(nb)
         criar_aba_campeonatos(nb)
+        criar_aba_youtube_channels(nb)
         
         def onDoubleClick(tree, event):
             # Fecha popup anterior (se houver)
@@ -1982,6 +1983,303 @@ def criar_aba_campeonatos(notebook):
 
 
 
+
+# ==============================================================================
+# CONFIGURAÇÃO E GESTÃO DE CANAIS DO YOUTUBE (Transmissões Validadas pela CBF)
+# ==============================================================================
+YOUTUBE_CHANNELS_CONFIG_FILE = "youtube_channels.json"
+
+DEFAULT_YOUTUBE_CHANNELS = [
+    {"nome": "Gaúcha", "url": "https://www.youtube.com/@gaucha", "ativo": True},
+    {"nome": "Gaúcha Esportes", "url": "https://www.youtube.com/@gauchaesportes", "ativo": True},
+    {"nome": "Atlântida TV", "url": "https://www.youtube.com/@atlantida_tv", "ativo": True},
+    {"nome": "Baldasso TV", "url": "https://www.youtube.com/@BaldassoTV", "ativo": True},
+    {"nome": "Bagé TV", "url": "https://www.youtube.com/@Bag%C3%A9TvOficial", "ativo": True},
+    {"nome": "Esporte Band RS", "url": "https://www.youtube.com/@EsporteBandRS", "ativo": True},
+]
+
+def _youtube_channels_config_path():
+    """Retorna o caminho do arquivo de configuração de canais do YouTube."""
+    return os.path.join(os.getcwd(), YOUTUBE_CHANNELS_CONFIG_FILE)
+
+def carregar_youtube_channels_config():
+    """Lê youtube_channels.json ou inicializa com os canais padrão."""
+    path = _youtube_channels_config_path()
+    if not os.path.exists(path):
+        salvar_youtube_channels_config(DEFAULT_YOUTUBE_CHANNELS)
+        return list(DEFAULT_YOUTUBE_CHANNELS)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list) and len(data) > 0:
+            return data
+        else:
+            salvar_youtube_channels_config(DEFAULT_YOUTUBE_CHANNELS)
+            return list(DEFAULT_YOUTUBE_CHANNELS)
+    except Exception as e:
+        logging.error(f"[YouTubeChannels] Erro ao carregar config: {e}")
+        return list(DEFAULT_YOUTUBE_CHANNELS)
+
+def salvar_youtube_channels_config(lista):
+    """Salva lista de canais em youtube_channels.json."""
+    path = _youtube_channels_config_path()
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(lista, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.error(f"[YouTubeChannels] Erro ao salvar config: {e}")
+        raise
+
+def eh_canal_youtube_cadastrado(plat_name: str) -> bool:
+    """Verifica se a plataforma é um canal do YouTube cadastrado no sistema."""
+    if not plat_name:
+        return False
+    p = str(plat_name).strip().lower()
+    if "cazé" in p or "caze" in p:
+        return False
+    try:
+        canais = carregar_youtube_channels_config()
+        for c in canais:
+            if c.get("nome", "").strip().lower() == p:
+                return True
+    except Exception:
+        pass
+    known = [
+        "gaucha", "gaúcha", "gaucha esportes", "gaúcha esportes",
+        "atlantida tv", "atlântida tv", "baldasso tv", "baldasso",
+        "bage tv", "bagé tv", "esporte band rs", "band rs"
+    ]
+    return any(k in p for k in known)
+
+def criar_aba_youtube_channels(notebook):
+    """Cria a aba 'Canais YouTube' no notebook para cadastro e monitoramento dinâmico."""
+    import tkinter.font as tkFont
+    from tkinter import messagebox, ttk
+
+    frame = ttk.Frame(notebook, padding=10)
+    notebook.add(frame, text="📺 Canais YouTube")
+
+    # ── Título ────────────────────────────────────────────────────────────────
+    ttk.Label(
+        frame,
+        text="Canais do YouTube Monitorados (Transmissões Validadas pela CBF)",
+        font=("Helvetica", 11, "bold"),
+    ).pack(anchor="w", pady=(0, 2))
+
+    ttk.Label(
+        frame,
+        text=(
+            "Cadastre aqui os canais do YouTube para busca de transmissões ao vivo. "
+            "Os eventos coletados são validados estritamente contra a tabela oficial da CBF "
+            "(Brasileirão Série A e Copa do Brasil) independente da plataforma da TV, e publicados no SharePoint."
+        ),
+        wraplength=1100,
+        foreground="#555",
+    ).pack(anchor="w", pady=(0, 8))
+
+    # ── Grid (Treeview) ───────────────────────────────────────────────────────
+    cols = ("nome", "url", "ativo")
+    col_headers = ("Nome do Canal", "URL do Canal (YouTube)", "Ativo")
+    col_widths = (250, 700, 80)
+
+    tv_frame = ttk.Frame(frame)
+    tv_frame.pack(fill="both", expand=True)
+
+    tv = ttk.Treeview(tv_frame, columns=cols, show="headings", height=10)
+    for col, hdr, w in zip(cols, col_headers, col_widths):
+        tv.heading(col, text=hdr)
+        tv.column(col, width=w, anchor="w" if col != "ativo" else "center")
+
+    vsb = ttk.Scrollbar(tv_frame, orient="vertical", command=tv.yview)
+    tv.configure(yscrollcommand=vsb.set)
+    tv.pack(side="left", fill="both", expand=True)
+    vsb.pack(side="right", fill="y")
+
+    # ── Funções internas da aba ───────────────────────────────────────────────
+    def _reload_tv():
+        """Recarrega o treeview a partir do JSON."""
+        for item in tv.get_children():
+            tv.delete(item)
+        for canal in carregar_youtube_channels_config():
+            ativo_str = "✅" if canal.get("ativo", True) else "❌"
+            tv.insert(
+                "",
+                "end",
+                values=(
+                    canal.get("nome", ""),
+                    canal.get("url", ""),
+                    ativo_str,
+                ),
+            )
+
+    def _abrir_formulario(titulo, valores_iniciais=None):
+        """Abre janela de formulário para adicionar/editar canal."""
+        result = {}
+        win = Toplevel(notebook)
+        win.title(titulo)
+        win.resizable(False, False)
+        win.grab_set()
+
+        win.update_idletasks()
+        pw = notebook.winfo_toplevel()
+        x = pw.winfo_x() + pw.winfo_width()  // 2 - 300
+        y = pw.winfo_y() + pw.winfo_height() // 2 - 120
+        win.geometry(f"600x240+{x}+{y}")
+
+        padx_lbl = 10
+        pady_row = 8
+
+        # Nome
+        ttk.Label(win, text="Nome do Canal:").grid(row=0, column=0, sticky="e", padx=padx_lbl, pady=pady_row)
+        e_nome = ttk.Entry(win, width=45)
+        e_nome.grid(row=0, column=1, columnspan=2, sticky="w", padx=padx_lbl, pady=pady_row)
+
+        # URL
+        ttk.Label(win, text="URL do Canal:").grid(row=1, column=0, sticky="e", padx=padx_lbl, pady=pady_row)
+        e_url = ttk.Entry(win, width=60)
+        e_url.grid(row=1, column=1, columnspan=2, sticky="w", padx=padx_lbl, pady=pady_row)
+
+        # Ativo
+        ativo_var = BooleanVar(value=True)
+        ttk.Checkbutton(win, text="Ativo (buscar eventos e lives)", variable=ativo_var).grid(
+            row=2, column=1, sticky="w", padx=padx_lbl, pady=pady_row
+        )
+
+        if valores_iniciais:
+            e_nome.insert(0, valores_iniciais.get("nome", ""))
+            e_url.insert(0, valores_iniciais.get("url", ""))
+            ativo_var.set(valores_iniciais.get("ativo", True))
+
+        def _confirmar():
+            nome = e_nome.get().strip()
+            url  = e_url.get().strip()
+            if not nome:
+                messagebox.showwarning("Atenção", "Informe o nome do canal.", parent=win)
+                return
+            if not url or "youtube.com" not in url.lower():
+                messagebox.showwarning("Atenção", "Informe uma URL válida do YouTube.", parent=win)
+                return
+            result["nome"] = nome
+            result["url"]  = url
+            result["ativo"] = ativo_var.get()
+            win.destroy()
+
+        def _cancelar():
+            win.destroy()
+
+        btn_frame = ttk.Frame(win)
+        btn_frame.grid(row=3, column=0, columnspan=3, pady=15)
+        ttk.Button(btn_frame, text="✅ Confirmar", command=_confirmar).pack(side="left", padx=10)
+        ttk.Button(btn_frame, text="❌ Cancelar",  command=_cancelar).pack(side="left", padx=10)
+
+        win.wait_window()
+        return result if result else None
+
+    def _adicionar():
+        dados = _abrir_formulario("Adicionar Canal do YouTube")
+        if not dados:
+            return
+        lista = carregar_youtube_channels_config()
+        lista.append(dados)
+        salvar_youtube_channels_config(lista)
+        _reload_tv()
+        messagebox.showinfo("Sucesso", f"Canal '{dados['nome']}' cadastrado com sucesso!")
+
+    def _editar():
+        sel = tv.selection()
+        if not sel:
+            messagebox.showinfo("Atenção", "Selecione um canal para editar.")
+            return
+        idx = tv.index(sel[0])
+        lista = carregar_youtube_channels_config()
+        if idx >= len(lista):
+            return
+        dados = _abrir_formulario("Editar Canal do YouTube", valores_iniciais=lista[idx])
+        if not dados:
+            return
+        lista[idx] = dados
+        salvar_youtube_channels_config(lista)
+        _reload_tv()
+        messagebox.showinfo("Sucesso", f"Canal '{dados['nome']}' atualizado com sucesso!")
+
+    def _remover():
+        sel = tv.selection()
+        if not sel:
+            messagebox.showinfo("Atenção", "Selecione um canal para remover.")
+            return
+        idx = tv.index(sel[0])
+        lista = carregar_youtube_channels_config()
+        if idx >= len(lista):
+            return
+        nome = lista[idx].get("nome", "?")
+        if not messagebox.askyesno("Confirmar", f"Deseja realmente remover o canal '{nome}'?"):
+            return
+        lista.pop(idx)
+        salvar_youtube_channels_config(lista)
+        _reload_tv()
+
+    def _toggle_ativo():
+        sel = tv.selection()
+        if not sel:
+            messagebox.showinfo("Atenção", "Selecione um canal.")
+            return
+        idx = tv.index(sel[0])
+        lista = carregar_youtube_channels_config()
+        if idx >= len(lista):
+            return
+        lista[idx]["ativo"] = not lista[idx].get("ativo", True)
+        salvar_youtube_channels_config(lista)
+        _reload_tv()
+
+    def _restaurar_padroes():
+        if messagebox.askyesno("Restaurar Padrões", "Deseja restaurar a lista com os 6 canais padrão (Gaúcha, Baldasso TV, Bagé TV, etc.)?"):
+            salvar_youtube_channels_config(DEFAULT_YOUTUBE_CHANNELS)
+            _reload_tv()
+            messagebox.showinfo("Sucesso", "Canais padrão restaurados com sucesso!")
+
+    def _buscar_agora():
+        def _task():
+            try:
+                desabilita_botoes()
+                btn_buscar.config(state="disabled")
+                logging.info("[YouTube Canais] Iniciando busca manual a partir da aba Canais...")
+                run_eventos_youtube_canais()
+                padronizar_nomes_grid(tree)
+                remover_duplicatas(tree)
+                ajustartodootree()
+                messagebox.showinfo("Busca Concluída", "Busca dos canais do YouTube concluída com sucesso! Os eventos válidos pela CBF foram adicionados ao grid.")
+            except Exception as ex:
+                logging.error(f"[YouTube Canais] Erro na busca manual: {ex}")
+                messagebox.showerror("Erro", f"Erro na busca dos canais: {ex}")
+            finally:
+                habilita_botoes()
+                btn_buscar.config(state="normal")
+
+        threading.Thread(target=_task, daemon=True).start()
+
+    # ── Barra de botões ───────────────────────────────────────────────────────
+    btn_bar = ttk.Frame(frame)
+    btn_bar.pack(fill="x", pady=(8, 0))
+
+    ttk.Button(btn_bar, text="➕ Adicionar Canal",    command=_adicionar).pack(side="left", padx=4)
+    ttk.Button(btn_bar, text="✏️ Editar Canal",       command=_editar).pack(side="left",   padx=4)
+    ttk.Button(btn_bar, text="🗑️ Remover",            command=_remover).pack(side="left",  padx=4)
+    ttk.Button(btn_bar, text="🔄 Ativar/Pausar",       command=_toggle_ativo).pack(side="left", padx=4)
+    ttk.Button(btn_bar, text="🔄 Restaurar Padrões",   command=_restaurar_padroes).pack(side="left", padx=4)
+
+    btn_buscar = ttk.Button(btn_bar, text="🔍 Buscar Canais Agora", command=_buscar_agora)
+    btn_buscar.pack(side="left", padx=10)
+
+    ttk.Label(
+        btn_bar,
+        text="💡 Dica: Os eventos desses canais só entram na lista se existirem na tabela oficial da CBF.",
+        foreground="#777",
+        font=("Helvetica", 8),
+    ).pack(side="right", padx=8)
+
+    _reload_tv()
+
+
 class _QuietLogger:
     def debug(self, msg): pass
     def info(self, msg): pass
@@ -2222,6 +2520,7 @@ def obter_eventos_futuros(canal_url, expected_camp=None):
     """
     from datetime import datetime, timezone
     import yt_dlp, logging
+    from sharepoint_client import _deep_normalize_partida
 
     eventos_futuros = []
     seen = set()
@@ -2347,6 +2646,194 @@ def obter_eventos_futuros(canal_url, expected_camp=None):
         except Exception:
             pass
         return None
+
+
+def obter_eventos_canal_youtube(canal_nome, canal_url, data_inicio_obj=None, cbf_idx=None):
+    from sharepoint_client import _deep_normalize_partida
+    """
+    Busca eventos de transmissões ao vivo agendadas no canal do YouTube especificado.
+    Valida estritamente se o confronto extraído existe na tabela oficial da CBF (Brasileirão Série A ou Copa do Brasil).
+    Retorna lista de tuplas: [(campeonato, partida_bonita, data_str, hora_str, "Esquerda", 15, canal_nome, vid_url)]
+    """
+    from datetime import datetime, timezone
+    import yt_dlp, logging
+
+    if cbf_idx is None:
+        cbf_idx = get_cbf_rights_index()
+
+    if data_inicio_obj is None:
+        try:
+            data_inicio_str = entry_data.get()
+            data_inicio_obj = datetime.strptime(data_inicio_str, "%d/%m/%Y")
+        except Exception:
+            data_inicio_obj = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    eventos = []
+    seen = set()
+
+    urls_para_consultar = []
+    base_clean = canal_url.strip().rstrip('/')
+    if not base_clean.endswith('/streams'):
+        urls_para_consultar.append(base_clean + '/streams')
+    urls_para_consultar.append(base_clean)
+
+    ydl_opts_list = {
+        'quiet': True, 'no_warnings': True, 'skip_download': True,
+        'extract_flat': True, 'playlistend': 25, 'ignoreerrors': True,
+        'logger': _QuietLogger(),
+    }
+
+    ydl_opts_video = {
+        'quiet': True, 'no_warnings': True, 'skip_download': True,
+        'ignore_no_formats_error': True, 'extractor_retries': 2,
+        'logger': _QuietLogger(),
+    }
+
+    for target_url in urls_para_consultar:
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts_list) as ydll:
+                info = ydll.extract_info(target_url, download=False) or {}
+            entries = info.get('entries') or []
+            if not entries:
+                continue
+
+            for entry in entries:
+                vid_id = entry.get('id')
+                vid_url = (
+                    entry.get('url')
+                    or entry.get('webpage_url')
+                    or (f"https://www.youtube.com/watch?v={vid_id}" if vid_id else None)
+                )
+                if not vid_url or vid_url in seen:
+                    continue
+                seen.add(vid_url)
+
+                titulo_raw = (entry.get('title') or '').strip()
+                if not titulo_raw:
+                    continue
+
+                partida_extraida = extrair_partida_youtube(titulo_raw)
+                if not partida_extraida:
+                    continue
+
+                p_norm = _deep_normalize_partida(partida_extraida)
+                in_bsa = p_norm in cbf_idx.get('brasileirao', {})
+                in_cdb = p_norm in cbf_idx.get('copa_do_brasil', {})
+
+                if not (in_bsa or in_cdb):
+                    logging.info(
+                        f"[YouTube Canais] Jogo '{partida_extraida}' ({canal_nome}) descartado: "
+                        "não consta na tabela oficial da CBF (Brasileirão/Copa do Brasil)."
+                    )
+                    continue
+
+                camp_atribuido = "Brasileirão serie A" if in_bsa else "Copa do Brasil"
+
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts_video) as ydv:
+                        vinfo = ydv.extract_info(vid_url, download=False) or {}
+                except Exception as e_vinfo:
+                    logging.debug(f"[YouTube Canais] Erro vinfo {vid_url}: {e_vinfo}")
+                    vinfo = {}
+
+                live_status = vinfo.get('live_status') or entry.get('live_status')
+                ts = (
+                    vinfo.get('scheduled_start_time')
+                    or vinfo.get('release_timestamp')
+                    or vinfo.get('timestamp')
+                )
+
+                if ts:
+                    try:
+                        dt_utc = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+                        dt_local = dt_utc.astimezone().replace(tzinfo=None)
+                    except Exception:
+                        dt_local = datetime.now()
+                else:
+                    ds = vinfo.get('release_date') or vinfo.get('upload_date')
+                    if ds and len(ds) == 8:
+                        try:
+                            dt_local = datetime.strptime(ds, '%Y%m%d')
+                        except Exception:
+                            dt_local = datetime.now()
+                    else:
+                        dt_local = datetime.now()
+
+                if dt_local.replace(hour=0, minute=0, second=0, microsecond=0) < data_inicio_obj:
+                    continue
+
+                data_formatada = dt_local.strftime('%d/%m/%Y')
+                hora_formatada = dt_local.strftime('%H:%M') if ts else "19:00"
+
+                partida_bonita = prettify_match_name(partida_extraida)
+                evento_tuple = (
+                    camp_atribuido,
+                    partida_bonita,
+                    data_formatada,
+                    hora_formatada,
+                    "Esquerda",
+                    15,
+                    canal_nome,
+                    vid_url
+                )
+                eventos.append(evento_tuple)
+                logging.info(
+                    f"[YouTube Canais] Validado: [{camp_atribuido}] {partida_bonita} em {data_formatada} {hora_formatada} ({canal_nome})"
+                )
+
+            if eventos:
+                break
+
+        except Exception as e_ch:
+            logging.error(f"[YouTube Canais] Erro ao consultar {target_url} ({canal_nome}): {e_ch}")
+
+    return eventos
+
+def run_eventos_youtube_canais():
+    """
+    Varre todos os canais cadastrados na aba 'Canais YouTube' que estejam ativos,
+    coleta transmissões ao vivo agendadas com jogos confirmados na tabela oficial da CBF,
+    e insere as partidas validadas no grid (Treeview).
+    """
+    logging.info("[YouTube Canais] Iniciando coleta de canais do YouTube cadastrados...")
+    try:
+        canais = carregar_youtube_channels_config()
+        canais_ativos = [c for c in canais if c.get("ativo", True)]
+        if not canais_ativos:
+            logging.info("[YouTube Canais] Nenhum canal ativo cadastrado para monitoramento.")
+            return
+
+        cbf_idx = get_cbf_rights_index()
+        var_nav = "Esquerda"
+        total_adicionados = 0
+
+        for ch in canais_ativos:
+            nome = ch.get("nome", "YouTube")
+            url = ch.get("url", "")
+            if not url:
+                continue
+
+            try:
+                if 'label_toolbarprocess' in globals() and label_toolbarprocess:
+                    label_toolbarprocess.config(text=f"Buscando YouTube: {nome}...")
+            except Exception:
+                pass
+
+            eventos = obter_eventos_canal_youtube(nome, url, cbf_idx=cbf_idx)
+            for ev in (eventos or []):
+                camp, part, data, hora, _, min_t, plat, vid_url = ev
+                row_val = (camp, part, data, hora, var_nav, min_t, plat, vid_url)
+                if 'tree' in globals() and tree:
+                    tree.insert("", "end", values=row_val)
+                    var_nav = "Direita" if var_nav == "Esquerda" else "Esquerda"
+                    if 'list_b' in globals() and isinstance(list_b, list):
+                        list_b.append(row_val)
+                total_adicionados += 1
+
+        logging.info(f"[YouTube Canais] Concluído: {total_adicionados} evento(s) adicionado(s) de canais do YouTube.")
+    except Exception as e:
+        logging.error(f"[YouTube Canais] Erro durante execução: {e}")
+
 
 def _to_bool(v):
     # aceita: "true"/"false", "1"/"0", True/False, 1/0, None
@@ -3737,6 +4224,14 @@ def is_cbf_broadcast_authorized(camp_name: str, match_name: str, platform_name: 
     from sharepoint_client import _deep_normalize_partida
     idx = get_cbf_rights_index()
     p_tuple = _deep_normalize_partida(match_name)
+
+    # Canais do YouTube cadastrados: autorizados para qualquer jogo confirmado na tabela da CBF
+    if eh_canal_youtube_cadastrado(platform_name):
+        if is_bsa:
+            return p_tuple in idx['brasileirao']
+        if is_cdb:
+            return p_tuple in idx['copa_do_brasil']
+        return True
 
     if is_bsa:
         cols = idx['brasileirao'].get(p_tuple)
@@ -5429,6 +5924,14 @@ def run_busca_eventos(ignorar_trava=False):
             logging.error(f"[CampExtras] Erro geral no pipeline dinâmico: {e_dyn}")
 
         # 🔥 PIPELINE CBF (PDF/Excel) - Roda por último e pula o que as plataformas já encontraram
+        # ── Transmissões em Canais do YouTube cadastrados (Validados pela CBF) ────
+        try:
+            run_eventos_youtube_canais()
+            padronizar_nomes_grid(tree)
+            remover_duplicatas(tree)
+        except Exception as e_yt_canais:
+            logging.error(f"[YouTube Canais] Erro no pipeline de canais do YouTube: {e_yt_canais}")
+
         if is_selected_plat("CBF"):
             logging.info("Acionando pipeline CBF...")
             run_eventos_cbf()
@@ -5714,11 +6217,11 @@ def remover_duplicatas(tree):
             values = tree.item(item, 'values')
             
             try:
-                # Chave agressiva: Jogo normalizado (FUZZY) e Data
-                # Usa deep_normalize_match para detectar 'Vasco' vs 'Vasco da Gama'
+                # Chave canônica por Jogo, Data e Plataforma
                 jogo_fuzzy = deep_normalize_match(values[1])
                 data_val = str(values[2])
-                chave = (jogo_fuzzy, data_val)
+                plat_val = str(values[6]).strip().lower() if len(values) > 6 else ""
+                chave = (jogo_fuzzy, data_val, plat_val)
             except (IndexError, TypeError, AttributeError) as e:
                 logging.warning(f"Item {item} com valores inválidos: {values} - {str(e)}")
                 continue

@@ -277,6 +277,23 @@ def _mapear_canal(canal_raw: Any) -> List[str]:
         "netflix": "Netflix",
         "onefootball": "OneFootball",
         "fifa +": "Fifa +",
+        "gaucha": "Gaúcha",
+        "gaúcha": "Gaúcha",
+        "gaucha esportes": "Gaúcha Esportes",
+        "gaúcha esportes": "Gaúcha Esportes",
+        "atlantida": "Atlântida TV",
+        "atlântida": "Atlântida TV",
+        "atlantida tv": "Atlântida TV",
+        "atlântida tv": "Atlântida TV",
+        "baldasso": "Baldasso TV",
+        "baldassotv": "Baldasso TV",
+        "baldasso tv": "Baldasso TV",
+        "bage": "Bagé TV",
+        "bagé": "Bagé TV",
+        "bage tv": "Bagé TV",
+        "bagé tv": "Bagé TV",
+        "esporte band rs": "Esporte Band RS",
+        "band rs": "Esporte Band RS",
     }
     val = mapping.get(ch.lower(), ch)
     return [val]
