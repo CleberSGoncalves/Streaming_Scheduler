@@ -4016,18 +4016,32 @@ def prettify_match_name(match_name):
 
 def padronizar_nomes_grid(tree):
     """
-    Varre todo o grid e substitui os nomes de partidas pelos nomes canônicos e bonitos.
+    Varre todo o grid e substitui os nomes de partidas e campeonatos pelos nomes canônicos e bonitos.
     Deve ser chamada antes do SharePoint ou da remoção de duplicatas.
     """
     try:
+        from sharepoint_client import _obter_titulo_oficial_campeonato
+    except Exception:
+        _obter_titulo_oficial_campeonato = None
+
+    try:
         for item in tree.get_children():
             values = list(tree.item(item, 'values'))
+            changed = False
+            if len(values) > 0 and _obter_titulo_oficial_campeonato:
+                camp_orig = str(values[0])
+                camp_oficial = _obter_titulo_oficial_campeonato(camp_orig)
+                if camp_orig != camp_oficial:
+                    values[0] = camp_oficial
+                    changed = True
             if len(values) > 1:
                 nome_original = str(values[1])
                 nome_bonito = prettify_match_name(nome_original)
                 if nome_original != nome_bonito:
                     values[1] = nome_bonito
-                    tree.item(item, values=values)
+                    changed = True
+            if changed:
+                tree.item(item, values=values)
     except Exception as e:
         import logging
         logging.error(f"Erro em padronizar_nomes_grid: {e}")

@@ -1,5 +1,5 @@
 {
-  "version": "17.12",
-  "download_url": "https://github.com/CleberSGoncalves/Streaming_Scheduler/releases/download/v17.12/Streaming_Scheduler.exe",
-  "changelog": "v17.12: Correção da ChaveEvento canônica (bloqueio absoluto de repetição de Amazon Prime e Cazé TV), chave com canal apenas para canais extras do YouTube e proteção antiduplicação."
+  "version": "17.13",
+  "download_url": "https://github.com/CleberSGoncalves/Streaming_Scheduler/releases/download/v17.13/Streaming_Scheduler.exe",
+  "changelog": "v17.13: Blindagem definitiva antiduplicação (Dedup Guard pré-envio), padronização oficial de campeonatos (CBF - Brasileirão Série A / CBF - Copa do Brasil), cache local de persistência e correção do desempacotamento de eventos no SharePoint."
 }

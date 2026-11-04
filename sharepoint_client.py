@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 
 import re
 
@@ -107,6 +108,55 @@ def _normalizar_campeonato(camp: str) -> str:
     c = re.sub(r"^cbf\s*[-–—:]*\s*", "", c, flags=re.IGNORECASE)
 
     return _normalizar_texto(c)
+
+
+CANONICAL_CHAMPIONSHIP_TITLES = {
+    "brasileiraoseriea": "CBF - Brasileirão Série A",
+    "brasileiraoserieb": "CBF - Brasileirão Série B",
+    "copadobrasil": "CBF - Copa do Brasil",
+    "femininocbf": "CBF - Feminino A1",
+    "brasileiraofemininoa1": "CBF - Feminino A1",
+    "paulistao": "Campeonato Paulista",
+    "campeonatopaulista": "Campeonato Paulista",
+    "libertadores": "CONMEBOL Libertadores",
+    "conmebollibertadores": "CONMEBOL Libertadores",
+    "sudamericana": "CONMEBOL Sudamericana",
+    "conmebolsudamericana": "CONMEBOL Sudamericana",
+    "mundialdeclubes": "Mundial de Clubes FIFA",
+    "mundialdeclubesfifa": "Mundial de Clubes FIFA",
+}
+
+def _obter_titulo_oficial_campeonato(camp: str) -> str:
+    """Retorna o nome oficial do campeonato formatado exatamente como no SharePoint."""
+    if not camp:
+        return ""
+    c_raw = str(camp).strip()
+    c_norm = _normalizar_campeonato(c_raw)
+    return CANONICAL_CHAMPIONSHIP_TITLES.get(c_norm, c_raw)
+
+SP_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sharepoint_events_cache.json")
+
+def _salvar_cache_sharepoint(eventos: list):
+    """Salva itens existentes em arquivo de cache local para persistência e fallback offline."""
+    try:
+        if not eventos:
+            return
+        with open(SP_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"updated_at": datetime.now().isoformat(), "events": eventos}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"[Cache SP] Falha ao salvar cache local: {e}")
+
+def _carregar_cache_sharepoint() -> list:
+    """Lê eventos existentes do arquivo de cache local."""
+    try:
+        if os.path.exists(SP_CACHE_FILE):
+            with open(SP_CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("events", [])
+    except Exception as e:
+        logger.warning(f"[Cache SP] Falha ao carregar cache local: {e}")
+    return []
+
 
 def _deep_normalize_partida(match_name: str) -> tuple:
 
@@ -895,108 +945,89 @@ def _desmembrar_itens_amontoados(headers: Dict[str, str], site_id: str, list_id:
     return fixed_count
 
 def _carregar_eventos_existentes(headers: Dict[str, str], site_id: str, list_id: str) -> Tuple[set, set, set, list]:
-
-    """Carrega os eventos existentes no SharePoint para desduplicação por canal e identificação de amontoados."""
-
+    """Carrega os eventos existentes no SharePoint para desduplicação por canal com fallback seguro para cache local."""
     existing_chaves = set()
-
     existing_channel_tuples = set()
-
     existing_channel_matches = set()
-
     multi_channel_items = []
+    loaded_raw_items = []
 
-    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists/{list_id}/items?expand=fields&$top=100"
-
+    # Usa top=30 para não estourar quota de capacidade da Microsoft
+    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists/{list_id}/items?expand=fields&$top=30"
     page_count = 0
+    max_pages = 5
 
-    max_pages = 4  # Indexa até 400 itens recentes sem sobrecarregar throttling
-
-    logger.info("[SharePoint Direct] Consultando eventos existentes no SharePoint para desduplicação por canal...")
-
-    while url and page_count < max_pages:
-
-        page_count += 1
-
-        try:
-
-            resp = _graph_request("GET", url, headers=headers, timeout=25)
-
+    logger.info("[SharePoint Direct] Consultando eventos existentes no SharePoint para desduplicação...")
+    try:
+        while url and page_count < max_pages:
+            page_count += 1
+            resp = _graph_request("GET", url, headers=headers, timeout=20)
             if not resp or resp.status_code != 200:
-
-                logger.warning(f"[SharePoint Direct] Erro ao buscar itens página {page_count}: {resp.status_code if resp else 'No response'}")
-
+                logger.warning(f"[SharePoint Direct] Busca página {page_count}: {resp.status_code if resp else 'No response'}")
                 break
-
             data = resp.json()
-
             items = data.get("value", [])
-
             for item in items:
-
+                loaded_raw_items.append(item)
                 f = item.get("fields", {})
-
                 ch = f.get("ChaveEvento")
-
                 if ch:
-
                     existing_chaves.add(str(ch).strip())
-
                 c_val = _normalizar_campeonato(f.get("Title"))
-
                 p_raw = f.get("Partida", "")
-
                 p_val = _normalizar_texto(p_raw)
-
                 p_tuple = _deep_normalize_partida(p_raw)
-
                 d_raw = str(f.get("Data", ""))[:10]
-
                 h_val = str(f.get("Hor_x00e1_rio", "")).strip()
-
                 canais_raw = f.get("Transmiss_x00e3_o") or []
-
                 if isinstance(canais_raw, str):
-
                     canais_raw = [canais_raw]
-
                 canais_unicos = list(dict.fromkeys([str(c).strip() for c in canais_raw if str(c).strip()]))
-
                 if len(canais_unicos) > 1:
-
-                    multi_channel_items.append({
-
-                        "id": item.get("id"),
-
-                        "fields": f,
-
-                        "canais": canais_unicos
-
-                    })
-
+                    multi_channel_items.append({"id": item.get("id"), "fields": f, "canais": canais_unicos})
                 for canal_item in canais_unicos:
-
                     c_norm = _normalizar_texto(canal_item)
-
                     if c_val and p_val and d_raw:
-
                         existing_channel_tuples.add((c_val, p_val, d_raw, h_val, c_norm))
-
                     if p_tuple != ("",) and d_raw:
+                        existing_channel_matches.add((p_tuple, d_raw, c_norm))
+            url = data.get("@odata.nextLink")
+            time.sleep(0.3)
+    except Exception as e:
+        logger.warning(f"[SharePoint Direct] Falha na consulta Graph ({e}). Verificando cache local...")
 
+    if loaded_raw_items:
+        _salvar_cache_sharepoint(loaded_raw_items)
+    else:
+        # Fallback para cache local em disco
+        cached = _carregar_cache_sharepoint()
+        if cached:
+            logger.info(f"[SharePoint Cache] Utilizando {len(cached)} eventos indexados do cache local.")
+            for item in cached:
+                f = item.get("fields", {})
+                ch = f.get("ChaveEvento")
+                if ch:
+                    existing_chaves.add(str(ch).strip())
+                c_val = _normalizar_campeonato(f.get("Title"))
+                p_raw = f.get("Partida", "")
+                p_val = _normalizar_texto(p_raw)
+                p_tuple = _deep_normalize_partida(p_raw)
+                d_raw = str(f.get("Data", ""))[:10]
+                h_val = str(f.get("Hor_x00e1_rio", "")).strip()
+                canais_raw = f.get("Transmiss_x00e3_o") or []
+                if isinstance(canais_raw, str):
+                    canais_raw = [canais_raw]
+                canais_unicos = list(dict.fromkeys([str(c).strip() for c in canais_raw if str(c).strip()]))
+                for canal_item in canais_unicos:
+                    c_norm = _normalizar_texto(canal_item)
+                    if c_val and p_val and d_raw:
+                        existing_channel_tuples.add((c_val, p_val, d_raw, h_val, c_norm))
+                    if p_tuple != ("",) and d_raw:
                         existing_channel_matches.add((p_tuple, d_raw, c_norm))
 
-            url = data.get("@odata.nextLink")
-
-        except Exception as e:
-
-            logger.warning(f"[SharePoint Direct] Erro ao carregar página {page_count} de eventos: {e}")
-
-            break
-
     logger.info(f"[SharePoint Direct] Indexados: {len(existing_chaves)} chaves, {len(existing_channel_matches)} canais de confrontos existentes.")
-
     return existing_chaves, existing_channel_tuples, existing_channel_matches, multi_channel_items
+
 
 def _post_to_sharepoint_direct(events: List[Dict[str, Any]]) -> Dict[str, Any]:
 
@@ -1020,7 +1051,7 @@ def _post_to_sharepoint_direct(events: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     site_id, list_id = _obter_site_e_lista_ids(headers)
 
-    existing_chaves, existing_channel_tuples, existing_channel_matches = _carregar_eventos_existentes(headers, site_id, list_id)
+    existing_chaves, existing_channel_tuples, existing_channel_matches, _ = _carregar_eventos_existentes(headers, site_id, list_id)
 
     # Se existirem itens previamente amontoados, desmembra-os em linhas individuais
 
@@ -1387,94 +1418,152 @@ def _post_to_flow(events: List[Dict[str, Any]]) -> Dict[str, Any]:
 # ---------- Funções públicas para uso no Streaming_Scheduler ----------
 
 def push_events_to_sharepoint(items: List[Dict[str, Any]]) -> Dict[str, Any]:
-
     """
-
-    Tenta o envio direto via Microsoft Graph API (mais rápido e com desduplicação imediata).
-
-    Caso ocorra falha total de comunicação, aciona o Power Automate como Fallback.
-
+    Blindagem Absoluta Anti-Duplicação:
+    1. Padroniza todos os campeonatos e partidas com nomenclatura oficial da CBF/SharePoint.
+    2. Consulta eventos existentes (Graph API com fallback automático para Cache Local).
+    3. Descarta preventivamente qualquer evento que já esteja presente no SharePoint.
+    4. Se restarem apenas eventos 100% inéditos, envia via Graph API ou Flow.
     """
-
     if not items:
-
         logger.info("[SharePoint] Nenhum item recebido para envio.")
-
         return {"total": 0, "inserted": 0, "skipped_existing": 0, "errors": []}
 
-    # Validação de segurança adicional: bloquear jogos do Brasileirão/Copa do Brasil sem direitos oficiais
-
+    # Validação de direitos oficiais de transmissão CBF
     try:
-
         from Streaming_Scheduler import is_cbf_broadcast_authorized
-
         items_validos = []
-
         for it in items:
-
             c = it.get("Campeonato", "")
-
             p = it.get("Partida", "")
-
             ch = it.get("Canal de Transmissão", "")
-
             if is_cbf_broadcast_authorized(c, p, ch):
-
                 items_validos.append(it)
-
             else:
-
                 logger.warning(f"[SharePoint Bloqueio] Evento '{p}' ({c}) [{ch}] rejeitado por não possuir direitos oficiais na CBF.")
-
         items = items_validos
-
     except Exception as e:
-
         logger.debug(f"[SharePoint] Verificação CBF rights ignorada: {e}")
 
     if not items:
-
         logger.info("[SharePoint] Nenhum item válido após filtragem de direitos CBF.")
-
         return {"total": 0, "inserted": 0, "skipped_existing": 0, "errors": []}
 
-    # 1. Tentativa Principal: Comunicação Direta via Graph API
+    # 1. Padronização Canônica Oficial de Campeonatos e Partidas
+    for it in items:
+        it["Campeonato"] = _obter_titulo_oficial_campeonato(it.get("Campeonato", ""))
+        part_raw = it.get("Partida", "")
+        # Remove caracteres indesejados e garante nomes bonitos
+        part_norm = re.sub(r"\s+[vVxX]\s+", " x ", part_raw).strip()
+        it["Partida"] = part_norm
 
+    # 2. Carrega eventos existentes no SharePoint (ou do Cache Local persistente)
+    existing_chaves = set()
+    existing_channel_tuples = set()
+    existing_channel_matches = set()
     try:
-
-        logger.info("[SharePoint] Iniciando envio direto via Microsoft Graph API...")
-
-        res = _post_to_sharepoint_direct(items)
-
-        
-
-        # Se a chamada ao Graph API processou os itens (mesmo que alguns tenham sido inseridos e outros pulados por duplicidade)
-
-        # nós NÃO devemos acionar o fallback para não duplicar no Power Automate.
-
-        if res and (res.get("inserted", 0) > 0 or res.get("skipped_existing", 0) > 0 or not res.get("errors")):
-
-            return res
-
-        elif res and res.get("errors"):
-
-            logger.warning(f"[SharePoint] Gravação direta falhou com erros: {res.get('errors')}. Acionando Fallback Power Automate...")
-
+        token = _obter_token_graph()
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        site_id, list_id = _obter_site_e_lista_ids(headers)
+        existing_chaves, existing_channel_tuples, existing_channel_matches, _ = _carregar_eventos_existentes(headers, site_id, list_id)
     except Exception as e:
+        logger.warning(f"[SharePoint] Erro ao conectar ao Graph para verificação prévia ({e}). Consultando Cache Local...")
+        cached = _carregar_cache_sharepoint()
+        for item in cached:
+            f = item.get("fields", {})
+            ch = f.get("ChaveEvento")
+            if ch: existing_chaves.add(str(ch).strip())
+            c_val = _normalizar_campeonato(f.get("Title"))
+            p_raw = f.get("Partida", "")
+            p_val = _normalizar_texto(p_raw)
+            p_tuple = _deep_normalize_partida(p_raw)
+            d_raw = str(f.get("Data", ""))[:10]
+            h_val = str(f.get("Hor_x00e1_rio", "")).strip()
+            canais_raw = f.get("Transmiss_x00e3_o") or []
+            if isinstance(canais_raw, str): canais_raw = [canais_raw]
+            for canal_item in canais_raw:
+                c_norm = _normalizar_texto(canal_item)
+                if c_val and p_val and d_raw: existing_channel_tuples.add((c_val, p_val, d_raw, h_val, c_norm))
+                if p_tuple != ("",) and d_raw: existing_channel_matches.add((p_tuple, d_raw, c_norm))
 
-        logger.warning(
+    # 3. Filtragem Universal Rigorosa: Descarta jogos que já existem no SharePoint
+    itens_novos = []
+    skipped_count = 0
 
-            f"[SharePoint] Falha na comunicação direta via Graph API ({e}). Acionando Fallback Power Automate...",
+    for it in items:
+        camp = it.get("Campeonato", "")
+        part = it.get("Partida", "")
+        dt_raw = str(it.get("Data", "")).strip()
+        hora = str(it.get("Horário", "")).strip()
+        canal_raw = it.get("Canal de Transmissão", "")
+        d_short = dt_raw[:10]
+        data_iso = f"{d_short}T12:00:00Z" if "T" not in dt_raw else dt_raw
 
-            exc_info=True
+        canais = _mapear_canal(canal_raw)
+        p_tuple = _deep_normalize_partida(part)
+        c_norm = _normalizar_campeonato(camp)
+        p_norm = _normalizar_texto(part)
 
-        )
+        ja_existe = False
+        for c_nome in canais:
+            ch_norm = _normalizar_texto(c_nome)
+            chave = _gerar_chave_evento(camp, part, data_iso, hora, c_nome)
+            match_key = (p_tuple, d_short, ch_norm)
+            tuple_check = (c_norm, p_norm, d_short, hora, ch_norm)
 
-    # 2. Fallback de Segurança: Power Automate
+            # Verifica chave composta canônica
+            if chave in existing_chaves:
+                ja_existe = True
+                break
 
-    logger.info("[SharePoint] Executando envio via Power Automate (Fallback)...")
+            # Verifica confronto + data + canal
+            if match_key in existing_channel_matches or tuple_check in existing_channel_tuples:
+                ja_existe = True
+                break
 
-    return _post_to_flow(items)
+            # Verifica chave histórica sem canal (para transmissões tradicionais como Amazon Prime, Cazé TV)
+            chave_sem_canal = _gerar_chave_evento(camp, part, data_iso, hora, "")
+            if chave_sem_canal in existing_chaves and ch_norm not in YOUTUBE_EXTRA_CHANNELS:
+                ja_existe = True
+                break
+
+        if ja_existe:
+            logger.info(f"[Dedup Guard] Evento '{part}' ({d_short}) [{canal_raw}] já existe no SharePoint. Ignorado.")
+            skipped_count += 1
+        else:
+            itens_novos.append(it)
+
+    # 4. Se todos os itens já existem, encerra imediatamente sem requisições desnecessárias
+    if not itens_novos:
+        logger.info(f"[Dedup Guard] Todos os {len(items)} evento(s) já existem no SharePoint. Nenhuma inserção necessária.")
+        return {
+            "total": len(items),
+            "inserted": 0,
+            "skipped_existing": skipped_count,
+            "errors": [],
+            "source": "dedup_guard"
+        }
+
+    logger.info(f"[Dedup Guard] {len(itens_novos)} novo(s) evento(s) serão enviados ao SharePoint ({skipped_count} já existiam).")
+
+    # 5. Tentativa Principal com os itens estritamente inéditos via Graph API
+    try:
+        logger.info("[SharePoint] Iniciando envio direto via Microsoft Graph API...")
+        res = _post_to_sharepoint_direct(itens_novos)
+        res["total"] = len(items)
+        res["skipped_existing"] = res.get("skipped_existing", 0) + skipped_count
+        if res and (res.get("inserted", 0) > 0 or not res.get("errors")):
+            return res
+    except Exception as e:
+        logger.warning(f"[SharePoint] Falha na comunicação direta ({e}). Acionando Fallback Power Automate...", exc_info=True)
+
+    # 6. Fallback de Segurança: Power Automate (apenas com itens inéditos!)
+    logger.info("[SharePoint] Executando envio via Power Automate (Fallback com itens inéditos)...")
+    res_flow = _post_to_flow(itens_novos)
+    res_flow["total"] = len(items)
+    res_flow["skipped_existing"] = res_flow.get("skipped_existing", 0) + skipped_count
+    return res_flow
+
 
 def push_event_from_tuple(row: Tuple[Any, ...]) -> Dict[str, Any]:
 
