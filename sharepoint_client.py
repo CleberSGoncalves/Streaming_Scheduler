@@ -410,6 +410,10 @@ def _is_match_duplicate(p_tuple: tuple, d_short: str, existing_match_dates: set)
 
     return False
 
+YOUTUBE_EXTRA_CHANNELS = {
+    "gaucha", "gauchayt", "gauchaesportes", "atlantidatv", "baldassotv", "bagetv", "esportebandrs", "bandrs"
+}
+
 def _gerar_chave_evento(camp: str, part: str, data_iso: str, hora: str, canal: str = "") -> str:
 
     """Gera chave composta única para o evento incluindo o canal (evita duplicação no SharePoint e garante 1 linha por canal)."""
@@ -430,8 +434,10 @@ def _gerar_chave_evento(camp: str, part: str, data_iso: str, hora: str, canal: s
 
     ch_clean = _normalizar_texto(canal)
 
-    if ch_clean:
-
+    # IMPORTANTE: Apenas canais adicionais do YouTube recebem sufixo na chave.
+    # Amazon Prime, Cazé TV e transmissões padrão usam a chave histórica sem sufixo,
+    # garantindo que JAMAIS ocorra duplicação no SharePoint.
+    if ch_clean and ch_clean in YOUTUBE_EXTRA_CHANNELS:
         return f"{c_clean}_{p_clean}_{d_clean}_{h_clean}_{ch_clean}"
 
     return f"{c_clean}_{p_clean}_{d_clean}_{h_clean}"
@@ -1014,7 +1020,7 @@ def _post_to_sharepoint_direct(events: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     site_id, list_id = _obter_site_e_lista_ids(headers)
 
-    existing_chaves, existing_channel_tuples, existing_channel_matches, multi_channel_items = _carregar_eventos_existentes(headers, site_id, list_id)
+    existing_chaves, existing_channel_tuples, existing_channel_matches = _carregar_eventos_existentes(headers, site_id, list_id)
 
     # Se existirem itens previamente amontoados, desmembra-os em linhas individuais
 
