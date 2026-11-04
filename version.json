@@ -1,5 +1,5 @@
 {
-  "version": "17.8",
-  "download_url": "https://github.com/CleberSGoncalves/Streaming_Scheduler/releases/download/v17.8/Streaming_Scheduler.exe",
-  "changelog": "v17.8: Sincronização garantida dos canais do YouTube com o SharePoint (busca manual e geral), atualização de transmissões multi-canal, bloqueio estrito de e-mails automáticos na madrugada (22h-07h) e correção de parsing no YouTube."
+  "version": "17.9",
+  "download_url": "https://github.com/CleberSGoncalves/Streaming_Scheduler/releases/download/v17.9/Streaming_Scheduler.exe",
+  "changelog": "v17.9: Publicação individual no SharePoint (uma linha por canal para cada jogo, sem amontoar), desmembramento automático de amontoados legados e desduplicação canônica por jogo+canal."
 }
