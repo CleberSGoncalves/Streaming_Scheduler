@@ -20,6 +20,10 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+class GraphThrottledException(Exception):
+    """Exceção levantada quando a Microsoft Graph API retorna 429 Throttling persistente."""
+    pass
+
 # -------------------- nomes de meses em PT-BR --------------------
 
 MONTH_NAMES_PT = [
@@ -604,10 +608,11 @@ def _obter_config_sharepoint() -> Dict[str, str]:
 
     }
 
-def _graph_request(method: str, url: str, headers: Dict[str, str], json_payload: Any = None, max_retries: int = 3, timeout: int = 25) -> requests.Response:
+def _graph_request(method: str, url: str, headers: Dict[str, str], json_payload: Any = None, max_retries: int = 2, timeout: int = 20) -> requests.Response:
     """
-    Executa chamada HTTP à Graph API com tratamento controlado de 429 (Rate Limit / Throttling)
-    limitando os tempos de espera para não congelar threads da UI nem disparar watchdog.
+    Executa chamada HTTP à Graph API com detecção imediata de 429 (Rate Limit / Throttling).
+    Quando a Microsoft sinaliza rate limit, levanta GraphThrottledException para acionar
+    o Fallback do Power Automate instantaneamente, sem congelar a aplicação.
     """
     attempt = 0
     resp = None
@@ -623,21 +628,22 @@ def _graph_request(method: str, url: str, headers: Dict[str, str], json_payload:
             else:
                 resp = requests.request(method, url, headers=headers, json=json_payload, timeout=timeout)
 
-            if resp.status_code == 429 or resp.status_code in (503, 504):
+            if resp.status_code == 429:
                 retry_after = resp.headers.get("Retry-After")
-                raw_wait = int(retry_after) if (retry_after and retry_after.isdigit()) else (2 ** attempt + 1)
-                wait_time = min(raw_wait, 10)
-                logger.warning(f"[Graph API] Status {resp.status_code} (Throttling/Busy). Aguardando {wait_time}s (solicitado {raw_wait}s) antes de tentar novamente ({attempt}/{max_retries})...")
-                time.sleep(wait_time)
+                raw_wait = int(retry_after) if (retry_after and retry_after.isdigit()) else 30
+                logger.warning(f"[Graph API] Status 429 (Throttling da Microsoft). Retry-After solicitado: {raw_wait}s.")
+                # Interrompe tentativas diretas e aciona fallback imediatamente
+                raise GraphThrottledException(f"Graph API sob rate limit da Microsoft (429 Throttling, solicitado {raw_wait}s)")
+
+            if resp.status_code in (503, 504):
+                time.sleep(2)
                 continue
 
             return resp
         except (requests.ConnectionError, requests.Timeout) as e:
-            wait_time = min(2 ** attempt + 1, 10)
-            logger.warning(f"[Graph API] Erro de conexão/timeout ({e}). Tentativa {attempt}/{max_retries}. Aguardando {wait_time}s...")
-            time.sleep(wait_time)
             if attempt >= max_retries:
                 raise
+            time.sleep(2)
     return resp
 
 def _obter_token_graph() -> str:

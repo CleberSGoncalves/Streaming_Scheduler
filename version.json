@@ -1,5 +1,5 @@
 {
-  "version": "17.10",
-  "download_url": "https://github.com/CleberSGoncalves/Streaming_Scheduler/releases/download/v17.10/Streaming_Scheduler.exe",
-  "changelog": "v17.10: Otimização de concorrência e rate limit no Microsoft Graph (eliminação de 429 throttling, limitação de retries sem travar threads, e inserção direta rápida de 1 linha por canal)."
+  "version": "17.11",
+  "download_url": "https://github.com/CleberSGoncalves/Streaming_Scheduler/releases/download/v17.11/Streaming_Scheduler.exe",
+  "changelog": "v17.11: Proteção instantânea contra 429 Throttling (chaveamento imediato sem sleeps para Power Automate), publicação resiliente e sem travamentos no SharePoint."
 }
