@@ -1,5 +1,5 @@
 {
-  "version": "17.9",
-  "download_url": "https://github.com/CleberSGoncalves/Streaming_Scheduler/releases/download/v17.9/Streaming_Scheduler.exe",
-  "changelog": "v17.9: Publicação individual no SharePoint (uma linha por canal para cada jogo, sem amontoar), desmembramento automático de amontoados legados e desduplicação canônica por jogo+canal."
+  "version": "17.10",
+  "download_url": "https://github.com/CleberSGoncalves/Streaming_Scheduler/releases/download/v17.10/Streaming_Scheduler.exe",
+  "changelog": "v17.10: Otimização de concorrência e rate limit no Microsoft Graph (eliminação de 429 throttling, limitação de retries sem travar threads, e inserção direta rápida de 1 linha por canal)."
 }
