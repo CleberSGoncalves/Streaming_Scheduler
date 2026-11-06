@@ -137,14 +137,35 @@ def _obter_titulo_oficial_campeonato(camp: str) -> str:
 SP_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sharepoint_events_cache.json")
 
 def _salvar_cache_sharepoint(eventos: list):
-    """Salva itens existentes em arquivo de cache local para persistência e fallback offline."""
+    """Salva itens existentes em arquivo de cache local de forma CUMULATIVA (merge por ID) para persistência e fallback offline."""
     try:
         if not eventos:
             return
+        existentes_dict = {}
+        if os.path.exists(SP_CACHE_FILE):
+            try:
+                with open(SP_CACHE_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    for ev in data.get("events", []):
+                        eid = str(ev.get("id") or ev.get("fields", {}).get("ChaveEvento") or "")
+                        if eid:
+                            existentes_dict[eid] = ev
+            except Exception:
+                pass
+
+        for ev in eventos:
+            eid = str(ev.get("id") or ev.get("fields", {}).get("ChaveEvento") or "")
+            if eid:
+                existentes_dict[eid] = ev
+
         with open(SP_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump({"updated_at": datetime.now().isoformat(), "events": eventos}, f, ensure_ascii=False, indent=2)
+            json.dump({
+                "updated_at": datetime.now().isoformat(),
+                "total": len(existentes_dict),
+                "events": list(existentes_dict.values())
+            }, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        logger.warning(f"[Cache SP] Falha ao salvar cache local: {e}")
+        logger.warning(f"[Cache SP] Falha ao salvar cache local cumulativo: {e}")
 
 def _carregar_cache_sharepoint() -> list:
     """Lê eventos existentes do arquivo de cache local."""
@@ -945,20 +966,30 @@ def _desmembrar_itens_amontoados(headers: Dict[str, str], site_id: str, list_id:
     return fixed_count
 
 def _carregar_eventos_existentes(headers: Dict[str, str], site_id: str, list_id: str) -> Tuple[set, set, set, list]:
-    """Carrega os eventos existentes no SharePoint para desduplicação por canal com fallback seguro para cache local."""
+    """
+    Carrega eventos existentes no SharePoint priorizando os mais recentemente modificados/criados,
+    garantindo que jogos recentes e futuros sejam 100% indexados para desduplicação.
+    """
     existing_chaves = set()
     existing_channel_tuples = set()
     existing_channel_matches = set()
     multi_channel_items = []
     loaded_raw_items = []
 
-    # Usa top=30 para não estourar quota de capacidade da Microsoft
-    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists/{list_id}/items?expand=fields&$top=30"
+    # 1. Tenta ordenar decrescente pelos mais recentes (lastModifiedDateTime desc)
+    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists/{list_id}/items?expand=fields&$top=100&$orderby=lastModifiedDateTime desc"
     page_count = 0
-    max_pages = 5
+    max_pages = 6  # Até 600 itens mais recentes
 
-    logger.info("[SharePoint Direct] Consultando eventos existentes no SharePoint para desduplicação...")
+    logger.info("[SharePoint Direct] Consultando eventos recentes no SharePoint para desduplicação...")
     try:
+        # Testa se a query com orderby é aceita
+        test_resp = _graph_request("GET", url, headers=headers, timeout=20)
+        if test_resp and test_resp.status_code == 400:
+            # Fallback para paginação sem orderby caso o tenant restrinja orderby em list items
+            logger.info("[SharePoint Direct] OrderBy não suportado pelo tenant. Usando paginação direta top=100...")
+            url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists/{list_id}/items?expand=fields&$top=100"
+
         while url and page_count < max_pages:
             page_count += 1
             resp = _graph_request("GET", url, headers=headers, timeout=20)
@@ -992,42 +1023,41 @@ def _carregar_eventos_existentes(headers: Dict[str, str], site_id: str, list_id:
                     if p_tuple != ("",) and d_raw:
                         existing_channel_matches.add((p_tuple, d_raw, c_norm))
             url = data.get("@odata.nextLink")
-            time.sleep(0.3)
+            time.sleep(0.2)
     except Exception as e:
         logger.warning(f"[SharePoint Direct] Falha na consulta Graph ({e}). Verificando cache local...")
 
+    # Salva os itens carregados de forma cumulativa
     if loaded_raw_items:
         _salvar_cache_sharepoint(loaded_raw_items)
-    else:
-        # Fallback para cache local em disco
-        cached = _carregar_cache_sharepoint()
-        if cached:
-            logger.info(f"[SharePoint Cache] Utilizando {len(cached)} eventos indexados do cache local.")
-            for item in cached:
-                f = item.get("fields", {})
-                ch = f.get("ChaveEvento")
-                if ch:
-                    existing_chaves.add(str(ch).strip())
-                c_val = _normalizar_campeonato(f.get("Title"))
-                p_raw = f.get("Partida", "")
-                p_val = _normalizar_texto(p_raw)
-                p_tuple = _deep_normalize_partida(p_raw)
-                d_raw = str(f.get("Data", ""))[:10]
-                h_val = str(f.get("Hor_x00e1_rio", "")).strip()
-                canais_raw = f.get("Transmiss_x00e3_o") or []
-                if isinstance(canais_raw, str):
-                    canais_raw = [canais_raw]
-                canais_unicos = list(dict.fromkeys([str(c).strip() for c in canais_raw if str(c).strip()]))
-                for canal_item in canais_unicos:
-                    c_norm = _normalizar_texto(canal_item)
-                    if c_val and p_val and d_raw:
-                        existing_channel_tuples.add((c_val, p_val, d_raw, h_val, c_norm))
-                    if p_tuple != ("",) and d_raw:
-                        existing_channel_matches.add((p_tuple, d_raw, c_norm))
+
+    # Sempre mescla com o cache cumulativo local para garantir que itens históricos conhecidos persistam
+    cached = _carregar_cache_sharepoint()
+    if cached:
+        for item in cached:
+            f = item.get("fields", {})
+            ch = f.get("ChaveEvento")
+            if ch:
+                existing_chaves.add(str(ch).strip())
+            c_val = _normalizar_campeonato(f.get("Title"))
+            p_raw = f.get("Partida", "")
+            p_val = _normalizar_texto(p_raw)
+            p_tuple = _deep_normalize_partida(p_raw)
+            d_raw = str(f.get("Data", ""))[:10]
+            h_val = str(f.get("Hor_x00e1_rio", "")).strip()
+            canais_raw = f.get("Transmiss_x00e3_o") or []
+            if isinstance(canais_raw, str):
+                canais_raw = [canais_raw]
+            canais_unicos = list(dict.fromkeys([str(c).strip() for c in canais_raw if str(c).strip()]))
+            for canal_item in canais_unicos:
+                c_norm = _normalizar_texto(canal_item)
+                if c_val and p_val and d_raw:
+                    existing_channel_tuples.add((c_val, p_val, d_raw, h_val, c_norm))
+                if p_tuple != ("",) and d_raw:
+                    existing_channel_matches.add((p_tuple, d_raw, c_norm))
 
     logger.info(f"[SharePoint Direct] Indexados: {len(existing_chaves)} chaves, {len(existing_channel_matches)} canais de confrontos existentes.")
     return existing_chaves, existing_channel_tuples, existing_channel_matches, multi_channel_items
-
 
 def _post_to_sharepoint_direct(events: List[Dict[str, Any]]) -> Dict[str, Any]:
 
@@ -1421,8 +1451,9 @@ def push_events_to_sharepoint(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Blindagem Absoluta Anti-Duplicação:
     1. Padroniza todos os campeonatos e partidas com nomenclatura oficial da CBF/SharePoint.
-    2. Consulta eventos existentes (Graph API com fallback automático para Cache Local).
-    3. Descarta preventivamente qualquer evento que já esteja presente no SharePoint.
+    2. Consulta eventos existentes (Graph API recente + Cache Cumulativo Local).
+    3. Descarta preventivamente qualquer evento cujo confronto já exista na mesma data
+       para o mesmo canal (mesmo com diferença de horário ou pequenos ajustes de data).
     4. Se restarem apenas eventos 100% inéditos, envia via Graph API ou Flow.
     """
     if not items:
@@ -1453,11 +1484,16 @@ def push_events_to_sharepoint(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     for it in items:
         it["Campeonato"] = _obter_titulo_oficial_campeonato(it.get("Campeonato", ""))
         part_raw = it.get("Partida", "")
-        # Remove caracteres indesejados e garante nomes bonitos
         part_norm = re.sub(r"\s+[vVxX]\s+", " x ", part_raw).strip()
         it["Partida"] = part_norm
+        # Injeta ChaveEvento calculada no item para que o Flow tenha a chave exata
+        dt_val = str(it.get("Data", "")).strip()[:10]
+        hr_val = str(it.get("Horário", "")).strip()
+        ch_val = str(it.get("Canal de Transmissão", "")).strip()
+        d_iso = f"{dt_val}T12:00:00Z"
+        it["ChaveEvento"] = _gerar_chave_evento(it["Campeonato"], part_norm, d_iso, hr_val, ch_val)
 
-    # 2. Carrega eventos existentes no SharePoint (ou do Cache Local persistente)
+    # 2. Carrega eventos existentes no SharePoint (ou do Cache Cumulativo Local)
     existing_chaves = set()
     existing_channel_tuples = set()
     existing_channel_matches = set()
@@ -1504,6 +1540,15 @@ def push_events_to_sharepoint(items: List[Dict[str, Any]]) -> Dict[str, Any]:
         c_norm = _normalizar_campeonato(camp)
         p_norm = _normalizar_texto(part)
 
+        # Datas vizinhas (+/- 1 dia) para tolerância de adiamento/antecipação da CBF
+        d_ant, d_pos = "", ""
+        try:
+            dt_obj = datetime.strptime(d_short, "%Y-%m-%d")
+            d_ant = (dt_obj - timedelta(days=1)).strftime("%Y-%m-%d")
+            d_pos = (dt_obj + timedelta(days=1)).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
         ja_existe = False
         for c_nome in canais:
             ch_norm = _normalizar_texto(c_nome)
@@ -1511,24 +1556,37 @@ def push_events_to_sharepoint(items: List[Dict[str, Any]]) -> Dict[str, Any]:
             match_key = (p_tuple, d_short, ch_norm)
             tuple_check = (c_norm, p_norm, d_short, hora, ch_norm)
 
-            # Verifica chave composta canônica
+            # A) Verifica chave composta canônica
             if chave in existing_chaves:
+                logger.info(f"[Dedup Guard] Chave '{chave}' já existe no SharePoint. Ignorando.")
                 ja_existe = True
                 break
 
-            # Verifica confronto + data + canal
-            if match_key in existing_channel_matches or tuple_check in existing_channel_tuples:
+            # B) REGRA MESTRA: Confronto + Data + Canal (INDEPENDENTE DO HORÁRIO!)
+            # Se o mesmo confronto já existe na mesma data no mesmo canal, é o mesmo jogo!
+            if match_key in existing_channel_matches:
+                logger.info(f"[Dedup Guard] Confronto {p_tuple} em {d_short} [{c_nome}] já consta no SharePoint. Ignorando duplicação.")
                 ja_existe = True
                 break
 
-            # Verifica chave histórica sem canal (para transmissões tradicionais como Amazon Prime, Cazé TV)
+            # C) Tolerância de data vizinha (+/- 1 dia) para o mesmo confronto e canal
+            if d_ant and (p_tuple, d_ant, ch_norm) in existing_channel_matches:
+                logger.info(f"[Dedup Guard] Confronto {p_tuple} já consta no dia anterior ({d_ant}) [{c_nome}]. Ignorando.")
+                ja_existe = True
+                break
+            if d_pos and (p_tuple, d_pos, ch_norm) in existing_channel_matches:
+                logger.info(f"[Dedup Guard] Confronto {p_tuple} já consta no dia seguinte ({d_pos}) [{c_nome}]. Ignorando.")
+                ja_existe = True
+                break
+
+            # D) Verifica chave histórica sem canal (para transmissões tradicionais como Amazon Prime, Cazé TV)
             chave_sem_canal = _gerar_chave_evento(camp, part, data_iso, hora, "")
             if chave_sem_canal in existing_chaves and ch_norm not in YOUTUBE_EXTRA_CHANNELS:
+                logger.info(f"[Dedup Guard] Chave histórica '{chave_sem_canal}' já existe no SharePoint. Ignorando.")
                 ja_existe = True
                 break
 
         if ja_existe:
-            logger.info(f"[Dedup Guard] Evento '{part}' ({d_short}) [{canal_raw}] já existe no SharePoint. Ignorado.")
             skipped_count += 1
         else:
             itens_novos.append(it)
@@ -1563,7 +1621,6 @@ def push_events_to_sharepoint(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     res_flow["total"] = len(items)
     res_flow["skipped_existing"] = res_flow.get("skipped_existing", 0) + skipped_count
     return res_flow
-
 
 def push_event_from_tuple(row: Tuple[Any, ...]) -> Dict[str, Any]:
 

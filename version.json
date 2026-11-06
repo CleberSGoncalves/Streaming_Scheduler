@@ -1,5 +1,5 @@
 {
-  "version": "17.13",
-  "download_url": "https://github.com/CleberSGoncalves/Streaming_Scheduler/releases/download/v17.13/Streaming_Scheduler.exe",
-  "changelog": "v17.13: Blindagem definitiva antiduplicação (Dedup Guard pré-envio), padronização oficial de campeonatos (CBF - Brasileirão Série A / CBF - Copa do Brasil), cache local de persistência e correção do desempacotamento de eventos no SharePoint."
+  "version": "17.14",
+  "download_url": "https://github.com/CleberSGoncalves/Streaming_Scheduler/releases/download/v17.14/Streaming_Scheduler.exe",
+  "changelog": "v17.14: Solução definitiva de duplicações: Dedup Guard por confronto+data independente de horários (ex: 18:30 vs 19:30), tolerância de +/-1 dia, cache cumulativo local persistente e bloqueio total de reenvio ao SharePoint e Power Automate."
 }
