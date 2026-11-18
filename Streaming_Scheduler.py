@@ -3207,25 +3207,11 @@ def preencher_sharepoint():
         return
 
     origem = "Direto (Graph API)" if result.get("source") == "direct_graph_api" else "Power Automate (Fallback)"
-    msg = (
-        f"SharePoint ({origem}):\n"
-        f"  Total: {result.get('total')}\n"
-        f"  Inseridos: {result.get('inserted')}\n"
-        f"  Já existiam: {result.get('skipped_existing')}\n"
-        f"  Erros: {len(result.get('errors', []))}"
-    )
-    logging.info(msg)
+    logging.info(f"- [SharePoint ({origem})] Finalizado. Total: {result.get('total')} | Inseridos: {result.get('inserted')} | Ignorados (já existiam): {result.get('skipped_existing')} | Erros: {len(result.get('errors', []))}")
 
     gs_res = result.get("gsheets", {})
     if gs_res:
-        msg_gs = (
-            f"Google Sheets:\n"
-            f"  Total: {gs_res.get('total')}\n"
-            f"  Inseridos: {gs_res.get('inserted')}\n"
-            f"  Já existiam: {gs_res.get('skipped_existing')}\n"
-            f"  Erros: {len(gs_res.get('errors', []))}"
-        )
-        logging.info(msg_gs)
+        logging.info(f"- [Google Sheets Direct] Finalizado. Total: {gs_res.get('total')} | Inseridos: {gs_res.get('inserted')} | Ignorados (já existiam): {gs_res.get('skipped_existing')} | Erros: {len(gs_res.get('errors', []))}")
 
     try:
         gs_info = f" | Sheets: +{gs_res.get('inserted', 0)} ({gs_res.get('skipped_existing', 0)} existiam)" if gs_res else ""

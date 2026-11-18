@@ -166,7 +166,8 @@ def _carregar_eventos_existentes_gsheets(webapp_url: str) -> Tuple[set, set, Lis
 
     try:
         logger.info("[Google Sheets Direct] Consultando eventos existentes na planilha...")
-        resp = requests.get(webapp_url, timeout=25)
+        query_url = f"{webapp_url}{'&' if '?' in webapp_url else '?'}format=json"
+        resp = requests.get(query_url, timeout=25)
         if resp.status_code == 200:
             loaded_items = resp.json()
             if isinstance(loaded_items, list) and loaded_items:
@@ -305,7 +306,7 @@ def push_events_to_google_sheets(items: List[Dict[str, Any]], webapp_url: Option
             errors.append(str(e))
 
     if not itens_para_inserir:
-        logger.info(f"[Google Sheets Dedup] Todos os itens já existem na planilha ({skipped_count} ignorados).")
+        logger.info(f"[Google Sheets Dedup] Todos os {len(items)} evento(s) já existem na planilha. Nenhuma inserção necessária ({skipped_count} já existiam).")
         return {
             "total": len(items),
             "inserted": 0,
@@ -321,7 +322,7 @@ def push_events_to_google_sheets(items: List[Dict[str, Any]], webapp_url: Option
     for i in range(0, len(itens_para_inserir), batch_size):
         batch = itens_para_inserir[i:i + batch_size]
         try:
-            logger.info(f"[Google Sheets] Enviando lote {i // batch_size + 1} ({len(batch)} itens) para o Apps Script...")
+            logger.info(f"[Google Sheets Direct] Processando {len(batch)} evento(s) para inserção direta no Google Sheets...")
             resp = requests.post(url, json=batch, timeout=60, allow_redirects=True)
             if resp.status_code in (200, 201):
                 try:
@@ -330,18 +331,21 @@ def push_events_to_google_sheets(items: List[Dict[str, Any]], webapp_url: Option
                     inserted_total += ins
                 except Exception:
                     inserted_total += len(batch)
+
+                for it_row in batch:
+                    logger.info(f"[Google Sheets Direct] Linha inserida para '{it_row.get('partida')}' ({it_row.get('data')}) no canal '{it_row.get('canal')}'.")
             else:
-                logger.error(f"[Google Sheets] Erro HTTP no envio: {resp.status_code} - {resp.text[:200]}")
+                logger.error(f"[Google Sheets Direct] Erro HTTP no envio: {resp.status_code} - {resp.text[:200]}")
                 errors.append(f"HTTP {resp.status_code}")
         except Exception as e:
-            logger.error(f"[Google Sheets] Exceção ao enviar lote: {e}", exc_info=True)
+            logger.error(f"[Google Sheets Direct] Exceção ao enviar lote: {e}", exc_info=True)
             errors.append(str(e))
 
     # Atualiza o cache local com os itens recém-inseridos
     if inserted_total > 0:
         _salvar_cache_gsheets(itens_para_inserir)
 
-    logger.info(f"[Google Sheets] Sincronização concluída: {inserted_total} inseridos, {skipped_count} já existiam.")
+    logger.info(f"[Google Sheets Direct] Finalizado. Total: {len(items)} | Inseridos: {inserted_total} | Ignorados (já existiam): {skipped_count} | Erros: {len(errors)}")
     return {
         "total": len(items),
         "inserted": inserted_total,
