@@ -629,6 +629,13 @@ def _mapear_canal(canal_raw: Any) -> List[str]:
 
     }
 
+    if "," in ch or "/" in ch:
+        partes = [p.strip() for p in re.split(r"[,/]", ch) if p.strip()]
+        res = []
+        for p in partes:
+            res.append(mapping.get(p.lower(), p))
+        return list(dict.fromkeys(res))
+
     val = mapping.get(ch.lower(), ch)
 
     return [val]
@@ -1591,36 +1598,63 @@ def push_events_to_sharepoint(items: List[Dict[str, Any]]) -> Dict[str, Any]:
         else:
             itens_novos.append(it)
 
-    # 4. Se todos os itens já existem, encerra imediatamente sem requisições desnecessárias
-    if not itens_novos:
-        logger.info(f"[Dedup Guard] Todos os {len(items)} evento(s) já existem no SharePoint. Nenhuma inserção necessária.")
-        return {
-            "total": len(items),
-            "inserted": 0,
-            "skipped_existing": skipped_count,
-            "errors": [],
-            "source": "dedup_guard"
-        }
+    def _executar_envio_sharepoint():
+        # 4. Se todos os itens já existem, encerra imediatamente sem requisições desnecessárias
+        if not itens_novos:
+            logger.info(f"[Dedup Guard] Todos os {len(items)} evento(s) já existem no SharePoint. Nenhuma inserção necessária.")
+            return {
+                "total": len(items),
+                "inserted": 0,
+                "skipped_existing": skipped_count,
+                "errors": [],
+                "source": "dedup_guard"
+            }
 
-    logger.info(f"[Dedup Guard] {len(itens_novos)} novo(s) evento(s) serão enviados ao SharePoint ({skipped_count} já existiam).")
+        logger.info(f"[Dedup Guard] {len(itens_novos)} novo(s) evento(s) serão enviados ao SharePoint ({skipped_count} já existiam).")
 
-    # 5. Tentativa Principal com os itens estritamente inéditos via Graph API
-    try:
-        logger.info("[SharePoint] Iniciando envio direto via Microsoft Graph API...")
-        res = _post_to_sharepoint_direct(itens_novos)
-        res["total"] = len(items)
-        res["skipped_existing"] = res.get("skipped_existing", 0) + skipped_count
-        if res and (res.get("inserted", 0) > 0 or not res.get("errors")):
-            return res
-    except Exception as e:
-        logger.warning(f"[SharePoint] Falha na comunicação direta ({e}). Acionando Fallback Power Automate...", exc_info=True)
+        # 5. Tentativa Principal com os itens estritamente inéditos via Graph API
+        try:
+            logger.info("[SharePoint] Iniciando envio direto via Microsoft Graph API...")
+            res = _post_to_sharepoint_direct(itens_novos)
+            res["total"] = len(items)
+            res["skipped_existing"] = res.get("skipped_existing", 0) + skipped_count
+            if res and (res.get("inserted", 0) > 0 or not res.get("errors")):
+                return res
+        except Exception as e:
+            logger.warning(f"[SharePoint] Falha na comunicação direta ({e}). Acionando Fallback Power Automate...", exc_info=True)
 
-    # 6. Fallback de Segurança: Power Automate (apenas com itens inéditos!)
-    logger.info("[SharePoint] Executando envio via Power Automate (Fallback com itens inéditos)...")
-    res_flow = _post_to_flow(itens_novos)
-    res_flow["total"] = len(items)
-    res_flow["skipped_existing"] = res_flow.get("skipped_existing", 0) + skipped_count
-    return res_flow
+        # 6. Fallback de Segurança: Power Automate (apenas com itens inéditos!)
+        logger.info("[SharePoint] Executando envio via Power Automate (Fallback com itens inéditos)...")
+        res_flow = _post_to_flow(itens_novos)
+        res_flow["total"] = len(items)
+        res_flow["skipped_existing"] = res_flow.get("skipped_existing", 0) + skipped_count
+        return res_flow
+
+    def _executar_envio_gsheets():
+        try:
+            from google_sheets_client import push_events_to_google_sheets
+            return push_events_to_google_sheets(items)
+        except Exception as e_gs:
+            logger.error(f"[Google Sheets] Erro na execução paralela: {e_gs}", exc_info=True)
+            return {
+                "total": len(items),
+                "inserted": 0,
+                "skipped_existing": 0,
+                "errors": [str(e_gs)],
+                "source": "google_sheets_error"
+            }
+
+    # Executa SharePoint e Google Sheets em paralelo
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_sp = executor.submit(_executar_envio_sharepoint)
+        future_gs = executor.submit(_executar_envio_gsheets)
+        res_sp = future_sp.result()
+        res_gs = future_gs.result()
+
+    res_sp["gsheets"] = res_gs
+    return res_sp
 
 def push_event_from_tuple(row: Tuple[Any, ...]) -> Dict[str, Any]:
 

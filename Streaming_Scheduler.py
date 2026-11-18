@@ -3215,8 +3215,21 @@ def preencher_sharepoint():
         f"  Erros: {len(result.get('errors', []))}"
     )
     logging.info(msg)
+
+    gs_res = result.get("gsheets", {})
+    if gs_res:
+        msg_gs = (
+            f"Google Sheets:\n"
+            f"  Total: {gs_res.get('total')}\n"
+            f"  Inseridos: {gs_res.get('inserted')}\n"
+            f"  Já existiam: {gs_res.get('skipped_existing')}\n"
+            f"  Erros: {len(gs_res.get('errors', []))}"
+        )
+        logging.info(msg_gs)
+
     try:
-        label_toolbar.config(text=f"SharePoint ({origem}): Inseridos: {result.get('inserted')}, Já existiam: {result.get('skipped_existing')}")
+        gs_info = f" | Sheets: +{gs_res.get('inserted', 0)} ({gs_res.get('skipped_existing', 0)} existiam)" if gs_res else ""
+        label_toolbar.config(text=f"SharePoint ({origem}): Inseridos: {result.get('inserted')}, Já existiam: {result.get('skipped_existing')}{gs_info}")
     except Exception:
         pass
 
