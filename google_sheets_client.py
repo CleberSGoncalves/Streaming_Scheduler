@@ -126,7 +126,7 @@ def _parse_date_to_dmy(date_val: Any) -> Tuple[str, str, str]:
     - iso_short: 'YYYY-MM-DD'
     - mes_pt: 'Novembro' (ou o mês correspondente)
     """
-    s = str(date_val or "").strip()
+    s = str(date_val or "").strip().lstrip("'").strip()
     if not s:
         now = datetime.now()
         return now.strftime("%d/%m/%Y"), now.strftime("%Y-%m-%d"), MONTH_NAMES_PT[now.month - 1]
@@ -281,19 +281,30 @@ def push_events_to_google_sheets(items: List[Dict[str, Any]], webapp_url: Option
                     skipped_count += 1
                     continue
 
+                # Limpa e formata data e horário com apóstrofo para forçar texto puro no Google Sheets
+                # Isso impede conversão em data americana (MM/DD) e horário serial de 1899
+                hora_limpa = str(hora or "").strip().lstrip("'").strip()
+                data_envio = f"'{dmy_str}"
+                hora_envio = f"'{hora_limpa}" if hora_limpa else ""
+
+                resp_final = str(ev.get("responsavel") or ev.get("BKP_x0020__x0028_Uso_x0020_Supor") or _obter_responsavel_canal(canal_nome)).strip()
+                pvid_final = str(ev.get("pvid") or ev.get("PVID") or _obter_pvid_canal(canal_nome)).strip()
+                status_final = str(ev.get("status_entrega") or ev.get("StatusdeEntrega") or "Pendente").strip()
+                prog_final = str(ev.get("programado") or ev.get("Programado_x0020_TV_x0020_BOX_x0") or "NÃO").strip()
+
                 # Cria o registro formatado exatamente como a planilha espera
                 row_dict = {
                     "anexos": str(ev.get("anexos", "") or ""),
                     "mes": mes,
-                    "data": dmy_str,
-                    "horario": hora,
+                    "data": data_envio,
+                    "horario": hora_envio,
                     "campeonato": camp_oficial,
                     "partida": part_norm,
-                    "responsavel": str(ev.get("responsavel") or _obter_responsavel_canal(canal_nome)),
+                    "responsavel": resp_final,
                     "canal": canal_nome,
-                    "pvid": str(ev.get("pvid") or _obter_pvid_canal(canal_nome)),
-                    "status_entrega": str(ev.get("status_entrega") or "Pendente"),
-                    "programado": str(ev.get("programado") or "NÃO")
+                    "pvid": pvid_final,
+                    "status_entrega": status_final,
+                    "programado": prog_final
                 }
                 itens_para_inserir.append(row_dict)
 

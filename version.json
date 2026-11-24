@@ -1,5 +1,5 @@
 {
-  "version": "17.15",
-  "download_url": "https://github.com/CleberSGoncalves/Streaming_Scheduler/releases/download/v17.15/Streaming_Scheduler.exe",
-  "changelog": "v17.15: Integração paralela direta com Google Sheets via Google Apps Script Web App. Planilha 100% sincronizada com o SharePoint (892 itens), desmembramento de canais individuais e proteção anti-duplicação rigorosa (Dedup Guard)."
+  "version": "17.16",
+  "download_url": "https://github.com/CleberSGoncalves/Streaming_Scheduler/releases/download/v17.16/Streaming_Scheduler.exe",
+  "changelog": "v17.16: Blindagem definitiva de formato literal de data/hora no Google Sheets (previne inversao mes/dia e horarios de 1899), associacao automatica de escala (Responsavel e PVID) no SharePoint e Google Sheets, e sincronizacao integral dos eventos (Gremio x Palmeiras e Santos x Corinthians)."
 }

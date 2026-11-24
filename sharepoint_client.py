@@ -922,28 +922,30 @@ def _desmembrar_itens_amontoados(headers: Dict[str, str], site_id: str, list_id:
 
                 chave_outro = _gerar_chave_evento(camp, part, data_iso, hora, outro_canal)
 
+                resp_desmemb = ""
+                pvid_desmemb = ""
+                try:
+                    from google_sheets_client import _obter_responsavel_canal, _obter_pvid_canal
+                    resp_desmemb = _obter_responsavel_canal(outro_canal)
+                    pvid_desmemb = _obter_pvid_canal(outro_canal)
+                except Exception:
+                    pass
+
                 novo_item_payload = {
-
                     "fields": {
-
                         "Title": camp,
-
                         "Partida": part,
-
                         "Data": data_iso,
-
                         "M_x00ea_s": mes or "Janeiro",
-
                         "Hor_x00e1_rio": hora,
-
                         "Transmiss_x00e3_o@odata.type": "Collection(Edm.String)",
-
                         "Transmiss_x00e3_o": [outro_canal],
-
-                        "ChaveEvento": chave_outro
-
+                        "ChaveEvento": chave_outro,
+                        "StatusdeEntrega": "Pendente",
+                        "BKP_x0020__x0028_Uso_x0020_Supor": resp_desmemb,
+                        "PVID": pvid_desmemb,
+                        "Programado_x0020_TV_x0020_BOX_x0": "NÃO"
                     }
-
                 }
 
                 r_post = _graph_request(
@@ -1160,30 +1162,34 @@ def _post_to_sharepoint_direct(events: List[Dict[str, Any]]) -> Dict[str, Any]:
 
                     continue
 
-                # Monta payload com exatamente 1 canal por linha (pill única)
+                # Monta payload com exatamente 1 canal por linha (pill única) e associa escala (responsável e PVID)
+                resp_final = str(ev.get("responsavel") or ev.get("BKP_x0020__x0028_Uso_x0020_Supor") or "").strip()
+                pvid_final = str(ev.get("pvid") or ev.get("PVID") or "").strip()
+                if not resp_final or not pvid_final:
+                    try:
+                        from google_sheets_client import _obter_responsavel_canal, _obter_pvid_canal
+                        if not resp_final:
+                            resp_final = _obter_responsavel_canal(canal_nome)
+                        if not pvid_final:
+                            pvid_final = _obter_pvid_canal(canal_nome)
+                    except Exception:
+                        pass
 
                 item_payload = {
-
                     "fields": {
-
                         "Title": camp,
-
                         "Partida": part,
-
                         "Data": data_iso,
-
                         "M_x00ea_s": mes or "Janeiro",
-
                         "Hor_x00e1_rio": hora,
-
                         "Transmiss_x00e3_o@odata.type": "Collection(Edm.String)",
-
                         "Transmiss_x00e3_o": [canal_nome],
-
-                        "ChaveEvento": chave
-
+                        "ChaveEvento": chave,
+                        "StatusdeEntrega": str(ev.get("status_entrega") or "Pendente"),
+                        "BKP_x0020__x0028_Uso_x0020_Supor": resp_final,
+                        "PVID": pvid_final,
+                        "Programado_x0020_TV_x0020_BOX_x0": str(ev.get("programado") or "NÃO")
                     }
-
                 }
 
                 r_ins = _graph_request(
